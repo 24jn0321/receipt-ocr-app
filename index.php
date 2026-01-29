@@ -1,31 +1,30 @@
 <?php
 /* =====================
-   1. 設定（Azure AI Vision & DB）
+   1. 配置（Azure AI Vision 和 数据库）
    ===================== */
-// Azure AI Vision の情報（ご自身のものに書き換えてください）
-$endpoint = "https://あなたのリソース名.cognitiveservices.azure.com/"; 
-$key      = "あなたのAPIキー"; 
+// ★ 请在此处填写你 Azure AI Vision 的端点和密钥
+$endpoint = "https://24jn0321.cognitiveservices.azure.com/"; 
+$key      = "填写你的Vision密钥"; 
 $uploadDir = "uploads/";
 
-// DB接続情報（提供いただいた内容）
+// 数据库连接信息（根据你提供的信息已填好）
 $serverName = "24jn0321.database.windows.net"; 
 $database   = "receiptdb";
 $username   = "sqladmin";
 $password   = "Abc842727925";
 
 /* =====================
-   2. データベース接続 (PDO)
+   2. 建立数据库连接 (PDO)
    ===================== */
 try {
     $conn = new PDO("sqlsrv:server=$serverName;Database=$database", $username, $password);
     $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 } catch (Exception $e) {
-    // 接続エラー時は画面に表示して停止
-    die("DB接続エラー: " . $e->getMessage());
+    die("数据库连接失败: " . $e->getMessage());
 }
 
 /* =====================
-   3. OCR 関数
+   3. OCR 解析函数
    ===================== */
 function analyzeImage($image, $endpoint, $key) {
     $url = $endpoint . "vision/v3.2/read/analyze";
@@ -64,37 +63,24 @@ function getResult($url, $key) {
 ?>
 
 <!DOCTYPE html>
-<html lang="ja">
+<html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>ファミリーマート レシートOCR</title>
+<title>全家便利店收据识别系统</title>
 <style>
-    body { font-family: sans-serif; margin: 20px; line-height: 1.6; }
+    body { font-family: sans-serif; margin: 20px; }
     .result-box { background: #f4f4f4; padding: 15px; border-radius: 5px; margin-top: 20px; }
-    .links { margin-top: 20px; border-top: 1px solid #ccc; padding-top: 10px; }
 </style>
 </head>
 <body>
-
-<h2>ファミリーマート レシートOCR</h2>
-
-<p>レシート画像をアップロードしてください（複数枚可）</p>
+<h2>全家便利店收据识别 (OCR + Azure SQL)</h2>
 <form method="post" enctype="multipart/form-data">
   <input type="file" name="images[]" multiple required>
-  <br><br>
-  <button type="submit">アップロードして解析</button>
+  <button type="submit">开始上传并识别</button>
 </form>
 
-<hr>
-
 <?php
-/* =====================
-   4. アップロード & OCR & DB保存
-   ===================== */
 if (!empty($_FILES['images']['tmp_name'][0])) {
-    // フォルダがない場合は作成
-    if (!is_dir($uploadDir)) mkdir($uploadDir, 0777, true);
-
     $items = [];
     $total = 0;
 
@@ -103,37 +89,28 @@ if (!empty($_FILES['images']['tmp_name'][0])) {
         $path = $uploadDir . $name;
         
         if (move_uploaded_file($tmp, $path)) {
-            // OCR実行
             $opUrl = analyzeImage($path, $endpoint, $key);
             if (!$opUrl) continue;
-            
             $ocr = getResult($opUrl, $key);
 
-            // OCRログ書き込み (ocr.log)
-            file_put_contents(
-                "ocr.log",
-                "--- File: $name ---\n" . json_encode($ocr, JSON_UNESCAPED_UNICODE) . PHP_EOL,
-                FILE_APPEND
-            );
+            // 记录 OCR 日志
+            file_put_contents("ocr.log", "--- 文件: $name ---\n".json_encode($ocr, JSON_UNESCAPED_UNICODE)."\n", FILE_APPEND);
 
             foreach ($ocr['analyzeResult']['readResults'] as $page) {
                 foreach ($page['lines'] as $line) {
-                    $text = $line['text'];
-
-                    // ファミマ形式に対応した正規表現
-                    // 商品名と金額を抽出し、末尾の「軽」や「*」を無視
-                    if (preg_match('/^(.+?)\s+[¥￥]?(\d+)(?:\s*[軽|*])?$/u', $text, $m)) {
-                        $prodName = trim($m[1]);
+                    // 针对全家收据的正则匹配：提取商品名和价格
+                    if (preg_match('/^(.+?)\s+[¥￥]?(\d+)(?:\s*[轻|*])?$/u', $line['text'], $m)) {
+                        $pName = trim($m[1]);
                         $price = (int)$m[2];
 
-                        // 除外ワード（小計、合計、軽などは商品として扱わない）
-                        if (!preg_match('/(小計|合計|対象|軽)/u', $prodName)) {
-                            $items[] = [$prodName, $price];
+                        // 排除非商品行（如小计、合计等）
+                        if (!preg_match('/(小计|合计|対象|軽)/u', $pName)) {
+                            $items[] = [$pName, $price];
                             $total += $price;
 
-                            // ★データベースへ保存★
+                            // ★ 执行数据库插入 ★
                             $stmt = $conn->prepare("INSERT INTO receipts (image_name, product_name, price) VALUES (?, ?, ?)");
-                            $stmt->execute([$name, $prodName, $price]);
+                            $stmt->execute([$name, $pName, $price]);
                         }
                     }
                 }
@@ -141,34 +118,18 @@ if (!empty($_FILES['images']['tmp_name'][0])) {
         }
     }
 
-    // 5. CSV生成
+    // 生成 CSV 文件
     $fp = fopen("result.csv", "w");
-    fwrite($fp, "\xEF\xBB\xBF"); // Excel用BOM
-    foreach ($items as $item) {
-        fputcsv($fp, $item);
-    }
-    fputcsv($fp, ["合計", $total]);
+    fwrite($fp, "\xEF\xBB\xBF"); // 防止 Excel 乱码
+    foreach ($items as $item) fputcsv($fp, $item);
+    fputcsv($fp, ["合计", $total]);
     fclose($fp);
 
-    // 6. 画面表示
-    echo "<div class='result-box'>";
-    echo "<h3>抽出結果</h3>";
-    if (empty($items)) {
-        echo "抽出できるデータが見つかりませんでした。";
-    } else {
-        foreach ($items as $item) {
-            echo htmlspecialchars($item[0]) . "　¥" . number_format($item[1]) . "<br>";
-        }
-        echo "<h4>合計　¥" . number_format($total) . "</h4>";
-    }
-    echo "</div>";
-
-    echo "<div class='links'>";
-    echo "・<a href='result.csv' download>CSVファイルをダウンロード</a><br>";
-    echo "・<a href='ocr.log' target='_blank'>ocr.log を確認</a>";
-    echo "</div>";
+    echo "<div class='result-box'><h3>识别结果</h3>";
+    foreach ($items as $item) echo htmlspecialchars($item[0])." - ¥".number_format($item[1])."<br>";
+    echo "<h4>总金额: ¥".number_format($total)."</h4>";
+    echo "<a href='result.csv' target='_blank'>下载 CSV 报表</a> | <a href='ocr.log' target='_blank'>查看 OCR 日志</a></div>";
 }
 ?>
-
 </body>
 </html>
