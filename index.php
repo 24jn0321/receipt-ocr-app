@@ -26,7 +26,7 @@ try {
 }
 
 /* =====================
-   2. 功能函数
+   2. 功能関数
    ===================== */
 function analyzeImage($image, $endpoint, $key) {
     $url = rtrim($endpoint, '/') . "/vision/v3.2/read/analyze";
@@ -68,7 +68,7 @@ $displayItems = [];
 $totalAmount = 0;
 
 if (!empty($_FILES['images']['tmp_name'][0])) {
-    file_put_contents("ocr.log", ""); // ログ初期化
+    file_put_contents("ocr.log", ""); 
 
     foreach ($_FILES['images']['tmp_name'] as $i => $tmp) {
         $name = basename($_FILES['images']['name'][$i]);
@@ -84,15 +84,25 @@ if (!empty($_FILES['images']['tmp_name'][0])) {
                 foreach ($ocr['analyzeResult']['readResults'] as $page) {
                     foreach ($page['lines'] as $line) {
                         $text = $line['text'];
-                        
-                        // 优化后的正则：匹配 [商品名] [空格/无空格] [金额] [轻/税/符号等后缀]
-                        if (preg_match('/^(.+?)[ \t　]*[¥￥]?([0-9,]{2,7})[ \t　]*(軽|轻|.*)?$/u', $text, $m)) {
+
+                        // 1. 排除包含地址、电话、日期时间特征的行
+                        if (preg_match('/\d{1,2}-\d{1,2}-\d{1,2}/', $text)) continue; // 排除 1-1-17 这种地址
+                        if (preg_match('/\d{1,2}:\d{2}/', $text)) continue;       // 排除 9:01 这种时间
+                        if (preg_match('/電話|番号|レジ|202\d年/', $text)) continue; // 排除电话、收银台号、年份
+
+                        // 2. 正则匹配：商品名 + 金额
+                        // 强制要求金额前有 ¥ 或商品名较长，避免匹配到地址末尾的孤立数字
+                        if (preg_match('/^(.{3,})[ \t　]+[¥￥]([0-9,]{2,7})/u', $text, $m)) {
                             $pName = trim($m[1]);
-                            $pName = preg_replace('/^[◎*＊]\s*/u', '', $pName); // 清理特殊前缀
+                            $pName = preg_replace('/^[◎*＊]\s*/u', '', $pName); 
                             $price = (int)str_replace(',', '', $m[2]);
+
+                            // 3. 严格黑名单
+                            $exclude = [
+                                '合計', '小計', '対象', '預り', 'お釣', '現金', '消費税', 
+                                '再発行', '责No', 'No.', '残高', '番号', '新宿', '東京都'
+                            ];
                             
-                            // 扩展过滤关键词，防止非商品行进入列表
-                            $exclude = ['合計', '小计', '対象', '預り', 'お釣', '現金', '消費税', '再発行', '责No', 'No.', '残高', '番号', 'レジ', '電話'];
                             $isSkip = false;
                             foreach ($exclude as $w) { 
                                 if (mb_strpos($pName, $w) !== false) {
@@ -104,6 +114,7 @@ if (!empty($_FILES['images']['tmp_name'][0])) {
                             if (!$isSkip && $price > 0) {
                                 $displayItems[] = ['name' => $pName, 'price' => $price];
                                 $totalAmount += $price;
+                                
                                 $stmt = $conn->prepare("INSERT INTO receipts (image_name, product_name, price) VALUES (?, ?, ?)");
                                 $stmt->execute([$name, $pName, $price]);
                             }
@@ -114,6 +125,7 @@ if (!empty($_FILES['images']['tmp_name'][0])) {
         }
     }
 
+    // 生成CSV
     $csvFile = 'result.csv';
     $handle = fopen($csvFile, 'w');
     fprintf($handle, chr(0xEF).chr(0xBB).chr(0xBF)); 
@@ -136,23 +148,16 @@ if (!empty($_FILES['images']['tmp_name'][0])) {
         h2 { color: #333; border-bottom: 2px solid #0078d4; padding-bottom: 10px; }
         .result-box { background: #f9f9f9; padding: 20px; border: 1px solid #ddd; border-radius: 8px; margin-top: 20px; }
         .item-row { display: flex; justify-content: space-between; border-bottom: 1px solid #eee; padding: 8px 0; }
-        .item-name { flex: 1; }
-        .item-price { font-weight: bold; width: 100px; text-align: right; }
         .total-row { font-size: 1.3em; font-weight: bold; text-align: right; margin-top: 15px; color: #d13438; border-top: 2px solid #333; padding-top: 10px; }
-        .download-zone { margin-top: 20px; padding: 15px; background: #e7f3ff; border-radius: 5px; }
-        .btn { display: inline-block; background: #0078d4; color: #fff; padding: 8px 15px; text-decoration: none; border-radius: 4px; margin-right: 10px; }
-        .btn:hover { background: #005a9e; }
+        .btn { display: inline-block; background: #0078d4; color: #fff; padding: 8px 15px; text-decoration: none; border-radius: 4px; margin-top: 10px; }
     </style>
 </head>
 <body>
-
 <div class="container">
-    <h2>🏪 FamilyMart 收据识别 (强化版)</h2>
-    <p>请上传收据照片进行 OCR 识别。支持多张上传。</p>
-    
+    <h2>🏪 FamilyMart 收据识别 (精简版)</h2>
     <form method="post" enctype="multipart/form-data">
         <input type="file" name="images[]" multiple required>
-        <button type="submit" style="cursor:pointer; padding: 5px 15px;">开始上传并识别</button>
+        <button type="submit">开始上传并识别</button>
     </form>
 
 <?php if (!empty($displayItems)): ?>
@@ -160,25 +165,14 @@ if (!empty($_FILES['images']['tmp_name'][0])) {
         <h3>识别结果</h3>
         <?php foreach ($displayItems as $item): ?>
             <div class="item-row">
-                <span class="item-name"><?php echo htmlspecialchars($item['name']); ?></span>
-                <span class="item-price">¥<?php echo number_format($item['price']); ?></span>
+                <span><?php echo htmlspecialchars($item['name']); ?></span>
+                <span>¥<?php echo number_format($item['price']); ?></span>
             </div>
         <?php endforeach; ?>
-        
-        <div class="total-row">
-            合计金额: ¥<?php echo number_format($totalAmount); ?>
-        </div>
-
-        <div class="download-zone">
-            <strong>📂 下载与验证:</strong><br><br>
-            <a href="result.csv" class="btn" download>下载 CSV 文件</a>
-            <a href="ocr.log" class="btn" target="_blank">查看 ocr.log 日志</a>
-        </div>
+        <div class="total-row">合计金额: ¥<?php echo number_format($totalAmount); ?></div>
+        <a href="result.csv" class="btn" download>下载结果</a>
     </div>
-<?php elseif ($_SERVER['REQUEST_METHOD'] == 'POST'): ?>
-    <p style="color:red; margin-top:20px;">未能识别到商品，请确认收据清晰度或检查 ocr.log 日志。</p>
 <?php endif; ?>
-
 </div>
 </body>
 </html>
