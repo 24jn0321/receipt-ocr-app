@@ -48,15 +48,13 @@ function getResult($url, $key) {
     return null;
 }
 
-// --- 3. 业务处理 ---
+// --- 3. 核心逻辑 ---
 $displayItems = [];
 $totalAmount = 0;
-$processed = false;
+$isPost = ($_SERVER['REQUEST_METHOD'] === 'POST');
 
-if (!empty($_FILES['images']['tmp_name'][0])) {
-    $processed = true;
+if ($isPost && !empty($_FILES['images']['tmp_name'][0])) {
     file_put_contents("ocr.log", ""); 
-
     foreach ($_FILES['images']['tmp_name'] as $i => $tmp) {
         $name = basename($_FILES['images']['name'][$i]);
         $path = $uploadDir . $name;
@@ -68,17 +66,16 @@ if (!empty($_FILES['images']['tmp_name'][0])) {
                 foreach ($ocr['analyzeResult']['readResults'][0]['lines'] as $line) {
                     $text = $line['text'];
 
-                    // 1. 严格过滤：排除包含日期、责任号、合计、消费税等关键词的行
-                    if (preg_match('/202[4-6]年|責No|番号|合計|小計|消費税|支払|対象|レジ|残高/u', $text)) continue;
+                    // 【核心手术 1：强力排除】只要包含这些词，绝对不是商品
+                    if (preg_match('/責No|レジ|番号|領収|合計|小計|消費税|対象|支払|残高|2024年/u', $text)) continue;
 
-                    // 2. 核心正则：根据你提供的 LOG，匹配 [名称] + [空格/符号] + [数字] + [可能有的轻/税/杂质]
-                    // 修正后的正则：匹配 1-4 位数字，并处理末尾可能有的"轻"
-                    if (preg_match('/^(.+?)\s+.*?([0-9,]{2,5})\s*(?:軽|轻|＊|\*|税|内)?$/u', $text, $m)) {
+                    // 【核心手术 2：极其宽松的抓取】
+                    // 只要这一行里有 ¥ 符号，且后面跟着数字，我就认定它是商品行
+                    if (preg_match('/^(.+?)[^\d]+¥\s*([0-9,]{2,5})/u', $text, $m)) {
                         $pName = trim($m[1]);
                         $price = (int)str_replace(',', '', $m[2]);
 
-                        // 3. 金额二次校验：FamilyMart 饮料通常在 50-1000 元
-                        if ($price > 50 && $price < 10000) {
+                        if ($price > 20) {
                             $displayItems[] = ['name' => $pName, 'price' => $price];
                             $totalAmount += $price;
 
@@ -93,13 +90,11 @@ if (!empty($_FILES['images']['tmp_name'][0])) {
         }
     }
     // 生成 CSV
-    if ($displayItems) {
-        $h = fopen('result.csv', 'w');
-        fprintf($h, chr(0xEF).chr(0xBB).chr(0xBF));
-        foreach ($displayItems as $it) { fputcsv($h, [$it['name'], $it['price']]); }
-        fputcsv($h, ['合计', $totalAmount]);
-        fclose($h);
-    }
+    $h = fopen('result.csv', 'w');
+    fprintf($h, chr(0xEF).chr(0xBB).chr(0xBF));
+    foreach ($displayItems as $it) { fputcsv($h, [$it['name'], $it['price']]); }
+    fputcsv($h, ['合计', $totalAmount]);
+    fclose($h);
 }
 ?>
 
@@ -109,40 +104,39 @@ if (!empty($_FILES['images']['tmp_name'][0])) {
     <meta charset="UTF-8">
     <title>FamilyMart 解析系统</title>
     <style>
-        body { font-family: sans-serif; max-width: 600px; margin: 40px auto; background: #f4f7f6; line-height: 1.6; }
+        body { font-family: sans-serif; max-width: 600px; margin: 40px auto; background: #f8f9fa; }
         .card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
         .item-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #eee; }
         .total { font-size: 1.5em; font-weight: bold; color: #d13438; text-align: right; margin: 20px 0; }
-        .btn-box { margin-top: 30px; display: flex; gap: 10px; }
-        .btn { flex: 1; text-align: center; padding: 12px; background: #0078d4; color: white; text-decoration: none; border-radius: 6px; font-weight: bold; }
+        .btn-box { margin-top: 30px; display: flex; gap: 10px; padding: 15px; background: #eef3f8; border-radius: 8px; }
+        .btn { flex: 1; text-align: center; padding: 12px; background: #0078d4; color: white; text-decoration: none; border-radius: 6px; font-weight: bold; cursor: pointer; border: none; }
         .btn-log { background: #666; }
     </style>
 </head>
 <body>
 <div class="card">
-    <h2>🏪 FamilyMart 解析 (日志修正版)</h2>
+    <h2>🏪 FamilyMart 解析系统</h2>
     <form method="post" enctype="multipart/form-data">
         <input type="file" name="images[]" multiple required>
-        <button type="submit" style="margin-top:10px; padding: 10px 20px; background:#28a745; color:white; border:none; border-radius:5px; cursor:pointer;">上传并识别</button>
+        <button type="submit" class="btn" style="margin-top:10px; width:100%; background:#28a745;">上传并识别</button>
     </form>
 
-    <?php if ($processed): ?>
+    <?php if ($isPost): ?>
         <hr style="margin:20px 0;">
         <?php if ($displayItems): ?>
-            <h3>识别到商品：</h3>
             <?php foreach ($displayItems as $it): ?>
                 <div class="item-row">
                     <span><?php echo htmlspecialchars($it['name']); ?></span>
                     <span>¥<?php echo number_format($it['price']); ?></span>
                 </div>
             <?php endforeach; ?>
-            <div class="total">合计金额：¥<?php echo number_format($totalAmount); ?></div>
+            <div class="total">合计：¥<?php echo number_format($totalAmount); ?></div>
         <?php else: ?>
-            <p style="color:red;">未能提取到有效商品数据，请检查日志。</p>
+            <p style="color:red; font-weight:bold;">未能检测到商品，请确保图片清晰并查看下方日志。</p>
         <?php endif; ?>
 
         <div class="btn-box">
-            <a href="result.csv" class="btn">📥 下载 CSV</a>
+            <a href="result.csv" class="btn" download>📥 下载 CSV</a>
             <a href="ocr.log" class="btn btn-log" target="_blank">📄 查看日志</a>
         </div>
     <?php endif; ?>
