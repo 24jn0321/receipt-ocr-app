@@ -4,7 +4,7 @@
    ===================== */
 // ★ 请在此处填写你 Azure AI Vision 的端点和密钥
 $endpoint = "https://24jn0321.cognitiveservices.azure.com/"; 
-$key      = "填写你的Vision密钥"; 
+$key      = "BQGkM056pMBAB5KVI6wmcSLBf2JlF8X2UUiwxw5N17K9QmWljMG3JQQJ99CAACi0881XJ3w3AAAFACOGrT37"; 
 $uploadDir = "uploads/";
 
 // 数据库连接信息（根据你提供的信息已填好）
@@ -132,4 +132,5 @@ if (!empty($_FILES['images']['tmp_name'][0])) {
 }
 ?>
 </body>
+
 </html>
