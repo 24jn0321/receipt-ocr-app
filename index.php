@@ -222,29 +222,18 @@ if (!empty($_FILES['images']['tmp_name'][0])) {
 
                         // 甚至允许中间有各种奇怪的空格
 
-                        if (preg_match('/^(.+?)[\s　]+[¥￥]?(\d+)/u', $text, $m)) {
+                        if (preg_match('/^(.+?)[\s　]+[¥￥]?([0-9,]{2,7})(?:\s*[轻|*|内|税])?$/u', $text, $m)) {
+    $pName = trim($m[1]);
+    $price = (int)str_replace(',', '', $m[2]); // 处理带逗号的金额，如 1,200
 
-                            $pName = trim($m[1]);
+    // 扩展排除关键词（日语版）
+    $exclude = ['合计', '合計', '小計', '小计', '対象', '軽', '再発行', '番号', '点数', '預り', 'お釣', '釣銭', 'カセ', '現 金'];
+    $shouldExclude = false;
+    foreach ($exclude as $word) {
+        if (mb_strpos($pName, $word) !== false) { $shouldExclude = true; break; }
+    }
 
-                            $price = (int)$m[2];
-
-
-
-                            // 排除常见的非商品关键词
-
-                            $exclude = ['合计', '合計', '小計', '小计', '対象', '軽', '再発行', '番号'];
-
-                            $shouldExclude = false;
-
-                            foreach ($exclude as $word) {
-
-                                if (strpos($pName, $word) !== false) { $shouldExclude = true; break; }
-
-                            }
-
-
-
-                            if (!$shouldExclude && $price > 0) {
+    if (!$shouldExclude && $price > 0) {
 
                                 $items[] = [$pName, $price];
 
@@ -305,3 +294,4 @@ if (!empty($_FILES['images']['tmp_name'][0])) {
 </body>
 
 </html> 
+
