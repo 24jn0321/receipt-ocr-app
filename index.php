@@ -1,21 +1,19 @@
 <?php
 /* =====================
-   1. 配置（Azure AI Vision 和 数据库）
+   1. 配置
    ===================== */
-// ★ 请在此处填写你 Azure AI Vision 的端点和密钥
 $endpoint = "https://24jn0321.cognitiveservices.azure.com/"; 
 $key      = "BQGkM056pMBAB5KVI6wmcSLBf2JlF8X2UUiwxw5N17K9QmWljMG3JQQJ99CAACi0881XJ3w3AAAFACOGrT37"; 
 $uploadDir = "uploads/";
 
-// 数据库连接信息（根据你提供的信息已填好）
-$serverName = "receipt-server-24jn0.database.windows.net"; // 后面一定要带 .database.windows.net
+if (!is_dir($uploadDir)) mkdir($uploadDir, 0777, true);
+
+// 数据库连接
+$serverName = "receipt-server-24jn0.database.windows.net";
 $database   = "receiptdb";
 $username   = "sqladmin"; 
 $password   = "Abc842727925";
 
-/* =====================
-   2. 建立数据库连接 (PDO)
-   ===================== */
 try {
     $conn = new PDO("sqlsrv:server=$serverName;Database=$database", $username, $password);
     $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
@@ -24,10 +22,11 @@ try {
 }
 
 /* =====================
-   3. OCR 解析函数
+   2. 功能函数
    ===================== */
 function analyzeImage($image, $endpoint, $key) {
-    $url = $endpoint . "vision/v3.2/read/analyze";
+    // 使用最新的 v3.2 版本路径
+    $url = rtrim($endpoint, '/') . "/vision/v3.2/read/analyze";
     $ch = curl_init($url);
     curl_setopt_array($ch, [
         CURLOPT_POST => true,
@@ -42,21 +41,25 @@ function analyzeImage($image, $endpoint, $key) {
     $res = curl_exec($ch);
     curl_close($ch);
 
-    preg_match('/Operation-Location: (.*)/', $res, $m);
+    preg_match('/Operation-Location: (.*)/i', $res, $m);
     return isset($m[1]) ? trim($m[1]) : null;
 }
 
 function getResult($url, $key) {
+    $max_attempts = 10;
+    $attempt = 0;
     do {
         sleep(1);
-        $ch = curl_init($url);
+        $ch = curl_init(trim($url));
         curl_setopt_array($ch, [
             CURLOPT_HTTPHEADER => ["Ocp-Apim-Subscription-Key: $key"],
             CURLOPT_RETURNTRANSFER => true
         ]);
-        $res = json_decode(curl_exec($ch), true);
+        $response = curl_exec($ch);
+        $res = json_decode($response, true);
         curl_close($ch);
-    } while ($res['status'] !== 'succeeded');
+        $attempt++;
+    } while (isset($res['status']) && $res['status'] !== 'succeeded' && $attempt < $max_attempts);
 
     return $res;
 }
@@ -65,19 +68,20 @@ function getResult($url, $key) {
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta charset="UTF-8">
-<title>全家便利店收据识别系统</title>
-<style>
-    body { font-family: sans-serif; margin: 20px; }
-    .result-box { background: #f4f4f4; padding: 15px; border-radius: 5px; margin-top: 20px; }
-</style>
+    <meta charset="UTF-8">
+    <title>全家收据识别系统</title>
+    <style>
+        body { font-family: sans-serif; margin: 20px; line-height: 1.6; }
+        .result-box { background: #f9f9f9; padding: 20px; border: 1px solid #ddd; border-radius: 8px; margin-top: 20px; }
+        .log-box { font-size: 12px; color: #666; background: #eee; padding: 10px; overflow-x: auto; }
+    </style>
 </head>
 <body>
-<h2>全家便利店收据识别 (OCR + Azure SQL)</h2>
-<form method="post" enctype="multipart/form-data">
-  <input type="file" name="images[]" multiple required>
-  <button type="submit">开始上传并识别</button>
-</form>
+    <h2>FamilyMart 收据识别 (强化版)</h2>
+    <form method="post" enctype="multipart/form-data">
+        <input type="file" name="images[]" multiple required>
+        <button type="submit">开始上传并识别</button>
+    </form>
 
 <?php
 if (!empty($_FILES['images']['tmp_name'][0])) {
@@ -90,27 +94,43 @@ if (!empty($_FILES['images']['tmp_name'][0])) {
         
         if (move_uploaded_file($tmp, $path)) {
             $opUrl = analyzeImage($path, $endpoint, $key);
-            if (!$opUrl) continue;
+            if (!$opUrl) {
+                echo "<p style='color:red;'>API 请求发送失败，请检查 Key 或 Endpoint。</p>";
+                continue;
+            }
+            
             $ocr = getResult($opUrl, $key);
+            // 保存原始日志以便排查
+            file_put_contents("ocr.log", json_encode($ocr, JSON_UNESCAPED_UNICODE));
 
-            // 记录 OCR 日志
-            file_put_contents("ocr.log", "--- 文件: $name ---\n".json_encode($ocr, JSON_UNESCAPED_UNICODE)."\n", FILE_APPEND);
+            if (isset($ocr['analyzeResult']['readResults'])) {
+                foreach ($ocr['analyzeResult']['readResults'] as $page) {
+                    foreach ($page['lines'] as $line) {
+                        $text = $line['text'];
+                        
+                        // 强化正则：匹配 [商品名] + [价格数字]
+                        // 甚至允许中间有各种奇怪的空格
+                        if (preg_match('/^(.+?)[\s　]+[¥￥]?(\d+)/u', $text, $m)) {
+                            $pName = trim($m[1]);
+                            $price = (int)$m[2];
 
-            foreach ($ocr['analyzeResult']['readResults'] as $page) {
-                foreach ($page['lines'] as $line) {
-                    // 针对全家收据的正则匹配：提取商品名和价格
-                    if (preg_match('/^(.+?)\s+[¥￥]?(\d+)(?:\s*[轻|*])?$/u', $line['text'], $m)) {
-                        $pName = trim($m[1]);
-                        $price = (int)$m[2];
+                            // 排除常见的非商品关键词
+                            $exclude = ['合计', '合計', '小計', '小计', '対象', '軽', '再発行', '番号'];
+                            $shouldExclude = false;
+                            foreach ($exclude as $word) {
+                                if (strpos($pName, $word) !== false) { $shouldExclude = true; break; }
+                            }
 
-                        // 排除非商品行（如小计、合计等）
-                        if (!preg_match('/(小计|合计|対象|軽)/u', $pName)) {
-                            $items[] = [$pName, $price];
-                            $total += $price;
+                            if (!$shouldExclude && $price > 0) {
+                                $items[] = [$pName, $price];
+                                $total += $price;
 
-                            // ★ 执行数据库插入 ★
-                            $stmt = $conn->prepare("INSERT INTO receipts (image_name, product_name, price) VALUES (?, ?, ?)");
-                            $stmt->execute([$name, $pName, $price]);
+                                // 插入数据库
+                                try {
+                                    $stmt = $conn->prepare("INSERT INTO receipts (image_name, product_name, price) VALUES (?, ?, ?)");
+                                    $stmt->execute([$name, $pName, $price]);
+                                } catch (Exception $dbE) { /* 忽略重复插入错误 */ }
+                            }
                         }
                     }
                 }
@@ -118,19 +138,17 @@ if (!empty($_FILES['images']['tmp_name'][0])) {
         }
     }
 
-    // 生成 CSV 文件
-    $fp = fopen("result.csv", "w");
-    fwrite($fp, "\xEF\xBB\xBF"); // 防止 Excel 乱码
-    foreach ($items as $item) fputcsv($fp, $item);
-    fputcsv($fp, ["合计", $total]);
-    fclose($fp);
-
     echo "<div class='result-box'><h3>识别结果</h3>";
-    foreach ($items as $item) echo htmlspecialchars($item[0])." - ¥".number_format($item[1])."<br>";
-    echo "<h4>总金额: ¥".number_format($total)."</h4>";
-    echo "<a href='result.csv' target='_blank'>下载 CSV 报表</a> | <a href='ocr.log' target='_blank'>查看 OCR 日志</a></div>";
+    if (empty($items)) {
+        echo "<p>未能识别出商品。请确认收据清晰且包含价格。</p>";
+    } else {
+        foreach ($items as $item) {
+            echo htmlspecialchars($item[0]) . " - <strong>¥" . number_format($item[1]) . "</strong><br>";
+        }
+        echo "<h4>总计金额: ¥" . number_format($total) . "</h4>";
+    }
+    echo "<hr><a href='ocr.log' target='_blank'>点此查看原始 OCR JSON 日志</a></div>";
 }
 ?>
 </body>
-
 </html>
