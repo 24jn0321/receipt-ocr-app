@@ -8,9 +8,9 @@ $key      = "填写你的Vision密钥";
 $uploadDir = "uploads/";
 
 // 数据库连接信息（根据你提供的信息已填好）
-$serverName = "24jn0321.database.windows.net"; 
+$serverName = "receipt-server-24jn0.database.windows.net"; // 后面一定要带 .database.windows.net
 $database   = "receiptdb";
-$username   = "sqladmin";
+$username   = "sqladmin"; 
 $password   = "Abc842727925";
 
 /* =====================
