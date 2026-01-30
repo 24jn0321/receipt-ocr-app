@@ -1,118 +1,107 @@
 <?php
-// 请确保你的 Endpoint 对应 Document Intelligence 的地址
 $endpoint = "https://24jn0321.cognitiveservices.azure.com/"; 
 $apiKey   = "BQGkM056pMBAB5KVI6wmcSLBf2JlF8X2UUiwxw5N17K9QmWljMG3JQQJ99CAACi0881XJ3w3AAAFACOGrT37";
 
 $results = [];
 
-// CSV 下载逻辑
-if (isset($_GET['dl']) && file_exists('data.json')) {
-    $data = json_decode(file_get_contents('data.json'), true);
-    header('Content-Type: text/csv; charset=UTF-8');
-    header('Content-Disposition: attachment; filename=receipt.csv');
-    echo "\xEF\xBB\xBF"; 
-    $f = fopen('php://output', 'w');
-    fputcsv($f, ['文件', '商品', '金额']);
-    foreach($data as $r) {
-        foreach($r['items'] as $it) fputcsv($f, [$r['file'], $it['name'], $it['price']]);
-        fputcsv($f, [$r['file'], '合计', $r['total']]);
-    }
-    fclose($f); exit;
-}
-
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
     foreach ($_FILES['receipts']['tmp_name'] as $key => $tmpName) {
         if (empty($tmpName)) continue;
-        
-        // 注意：API 路径变更为 documentintelligence
-        $apiUrl = rtrim($endpoint, '/') . "/documentintelligence/documentModels/prebuilt-receipt:analyze?api-version=2023-10-31-preview";
+        $fileName = $_FILES['receipts']['name'][$key];
 
-        $imgData = file_get_contents($tmpName);
+        $apiUrl = rtrim($endpoint, '/') . "/computervision/imageanalysis:analyze?api-version=2023-10-01&features=read";
+        $imageData = file_get_contents($tmpName);
+
         $ch = curl_init($apiUrl);
         curl_setopt($ch, CURLOPT_POST, true);
-        curl_setopt($ch, CURLOPT_HTTPHEADER, [
-            'Content-Type: application/octet-stream',
-            'Ocp-Apim-Subscription-Key: ' . $apiKey
-        ]);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, $imgData);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/octet-stream', 'Ocp-Apim-Subscription-Key: ' . $apiKey]);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $imageData);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_HEADER, true); // 需要获取 Operation-Location
         $response = curl_exec($ch);
-        $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
-        $headers = substr($response, 0, $headerSize);
         curl_close($ch);
 
-        // 获取异步查询地址
-        if (preg_match('/Operation-Location: (.*)/i', $headers, $matches)) {
-            $resultUrl = trim($matches[1]);
-            // 轮询等待结果 (简单起见，这里循环几次)
-            for ($i = 0; $i < 5; $i++) {
-                sleep(1);
-                $ch = curl_init($resultUrl);
-                curl_setopt($ch, CURLOPT_HTTPHEADER, ['Ocp-Apim-Subscription-Key: ' . $apiKey]);
-                curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-                $resJson = curl_exec($ch);
-                curl_close($ch);
-                $data = json_decode($resJson, true);
-                if ($data['status'] == 'succeeded') break;
-            }
+        $data = json_decode($response, true);
+        $lines = $data['readResult']['blocks'][0]['lines'] ?? [];
+        
+        $currentFileItems = [];
+        $totalAmount = 0;
 
-            // 解析 DI 返回的结构化数据
-            $receipt = $data['analyzeResult']['documents'][0]['fields'] ?? [];
-            $items = [];
-            if (isset($receipt['Items']['valueArray'])) {
-                foreach ($receipt['Items']['valueArray'] as $val) {
-                    $item = $val['valueObject'];
-                    $items[] = [
-                        'name'  => $item['Description']['valueString'] ?? '未知商品',
-                        'price' => $item['TotalPrice']['valueCurrency']['amount'] ?? 0
-                    ];
+        for ($i = 0; $i < count($lines); $i++) {
+            $text = trim($lines[$i]['text']);
+
+            // 1. 商品名の抽出ロジック
+            // 「証」「領収」「合計」などの不要な単語を避け、かつ2文字以上の行を対象にする
+            if (!preg_match('/[¥￥]/u', $text) && 
+                !preg_match('/Family|新宿|電話|登録|2024|レジ|領収|対象|消費税|支払|残高|証|単価/u', $text) &&
+                mb_strlen($text) >= 2) {
+                
+                // 次の行に金額があるか探す
+                if (isset($lines[$i + 1])) {
+                    $nextText = $lines[$i + 1]['text'];
+                    if (preg_match('/[¥￥]([\d,]+)/u', $nextText, $matches)) {
+                        $price = (int)str_replace(',', '', $matches[1]);
+                        
+                        // 「軽」や「＊」だけを削除（◎は残す！）
+                        $cleanName = str_replace(['＊', '*', '軽'], '', $text);
+                        $currentFileItems[] = ['name' => trim($cleanName), 'price' => $price];
+                        
+                        $i++; // 金額の行をスキップ
+                        continue;
+                    }
                 }
             }
-            $total = $receipt['Total']['valueCurrency']['amount'] ?? 0;
-            $results[] = ['file' => $_FILES['receipts']['name'][$key], 'items' => $items, 'total' => $total];
+            
+            // 2. 合計金額の抽出
+            if (mb_strpos($text, '計') !== false && !mb_strpos($text, '消費税')) {
+                $searchArea = $text . ($lines[$i+1]['text'] ?? '') . ($lines[$i+2]['text'] ?? '');
+                if (preg_match('/[¥￥]([\d,]+)/u', $searchArea, $m)) {
+                    $val = (int)str_replace(',', '', $m[1]);
+                    if ($val > $totalAmount) $totalAmount = $val;
+                }
+            }
         }
+        $results[] = ['file' => $fileName, 'items' => $currentFileItems, 'total' => $totalAmount];
     }
-    file_put_contents('data.json', json_encode($results));
 }
 ?>
+
 <!DOCTYPE html>
-<html lang="zh">
+<html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <title>DI 高级解析版</title>
+    <title>コンビニレシート解析</title>
     <style>
-        body { font-family: sans-serif; background: #f0f2f5; padding: 20px; }
-        .container { max-width: 500px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
-        .card { border-left: 5px solid #007bff; background: #f8f9fa; padding: 15px; margin-top: 15px; border-radius: 4px; }
-        .row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px dashed #ccc; }
-        .total { text-align: right; color: #d32f2f; font-size: 24px; font-weight: bold; margin-top: 10px; }
-        .btn { width: 100%; padding: 12px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; }
+        body { font-family: sans-serif; background: #f4f7f6; padding: 20px; }
+        .container { max-width: 700px; margin: auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .receipt-result { border-left: 6px solid #00a95c; background: #fdfdfd; padding: 15px; margin-bottom: 20px; border-bottom: 1px solid #eee; }
+        .item-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px dashed #ddd; }
+        .total-row { font-size: 1.6em; font-weight: bold; color: #d32f2f; margin-top: 15px; text-align: right; }
+        .btn { padding: 10px 20px; background: #0078d4; color: white; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h2 style="text-align:center;">🧾 Document Intelligence 版</h2>
-        <form method="post" enctype="multipart/form-data">
-            <input type="file" name="receipts[]" multiple><br><br>
-            <button type="submit" class="btn">开始智能识别</button>
+        <h2>コンビニレシート解析</h2>
+        <form action="" method="post" enctype="multipart/form-data">
+            <p>画像をアップロードしてください：</p>
+            <input type="file" name="receipts[]" multiple accept="image/*"><br><br>
+            <button type="submit" class="btn">解析実行</button>
         </form>
 
-        <?php foreach ($results as $res): ?>
-            <div class="card">
-                <div style="font-size:12px; color:#666;"><?= htmlspecialchars($res['file']) ?></div>
-                <?php foreach ($res['items'] as $it): ?>
-                    <div class="row">
-                        <span><?= htmlspecialchars($it['name']) ?></span>
-                        <span>¥<?= number_format($it['price']) ?></span>
-                    </div>
-                <?php endforeach; ?>
-                <div class="total">合计 ¥<?= number_format($res['total']) ?></div>
-            </div>
-        <?php endforeach; ?>
-
-        <?php if($results): ?>
-            <p style="text-align:center; margin-top:20px;"><a href="?dl=csv">📥 下载 CSV 报表</a></p>
+        <?php if (!empty($results)): ?>
+            <hr>
+            <?php foreach ($results as $res): ?>
+                <div class="receipt-result">
+                    <p style="color: #666;">📄 <?php echo htmlspecialchars($res['file']); ?></p>
+                    <?php foreach ($res['items'] as $i): ?>
+                        <div class="item-row">
+                            <span><?php echo htmlspecialchars($i['name']); ?></span>
+                            <span>¥<?php echo number_format($i['price']); ?></span>
+                        </div>
+                    <?php endforeach; ?>
+                    <div class="total-row">合計 ¥<?php echo number_format($res['total']); ?></div>
+                </div>
+            <?php endforeach; ?>
         <?php endif; ?>
     </div>
 </body>
