@@ -1,41 +1,15 @@
 <?php
-// Azure 配置
 $endpoint = "https://24jn0321.cognitiveservices.azure.com/"; 
 $apiKey   = "BQGkM056pMBAB5KVI6wmcSLBf2JlF8X2UUiwxw5N17K9QmWljMG3JQQJ99CAACi0881XJ3w3AAAFACOGrT37";
 
 $results = [];
 
-// --- 1. 下载处理 ---
-if (isset($_GET['download'])) {
-    if ($_GET['download'] == 'log' && file_exists('ocr_log.txt')) {
-        header('Content-Type: text/plain');
-        header('Content-Disposition: attachment; filename=receipt_log.txt');
-        readfile('ocr_log.txt'); exit;
-    }
-    if ($_GET['download'] == 'csv' && file_exists('last_data.json')) {
-        $data = json_decode(file_get_contents('last_data.json'), true);
-        header('Content-Type: text/csv; charset=UTF-8');
-        header('Content-Disposition: attachment; filename=data.csv');
-        echo "\xEF\xBB\xBF"; // 防止Excel乱码
-        $f = fopen('php://output', 'w');
-        fputcsv($f, ['文件名', '商品名', '价格']);
-        foreach($data as $r) {
-            foreach($r['items'] as $it) fputcsv($f, [$r['file'], $it['name'], $it['price']]);
-            fputcsv($f, [$r['file'], '--- 合计 ---', $r['total']]);
-        }
-        fclose($f); exit;
-    }
-}
-
-// --- 2. 识别处理 ---
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
-    $log_content = "";
     foreach ($_FILES['receipts']['tmp_name'] as $key => $tmpName) {
         if (empty($tmpName)) continue;
-        $fileName = $_FILES['receipts']['name'][$key];
-
-        $apiUrl = rtrim($endpoint, '/') . "/computervision/imageanalysis:analyze?api-version=2023-10-01&features=read";
+        
         $imgData = file_get_contents($tmpName);
+        $apiUrl = rtrim($endpoint, '/') . "/computervision/imageanalysis:analyze?api-version=2023-10-01&features=read";
 
         $ch = curl_init($apiUrl);
         curl_setopt($ch, CURLOPT_POST, true);
@@ -45,90 +19,89 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
         $resp = curl_exec($ch);
         curl_close($ch);
 
-        $log_content .= "FILE: $fileName\n" . $resp . "\n\n";
         $json = json_decode($resp, true);
         $lines = $json['readResult']['blocks'][0]['lines'] ?? [];
 
-        $items = []; $total = 0; $stop = false;
+        $items = []; $total = 0;
+        $is_after_header = false; // 是否过了“领收证”
+        $is_total_done = false;   // 是否已经抓到合计
 
         foreach ($lines as $line) {
-            if ($stop) break;
             $text = trim($line['text']);
 
-            // A. 合计逻辑：看到“合计”或“小计”，抓数字并关停
-            if (preg_match('/(合計|合\s*計|小計|计)/u', $text)) {
-                if (preg_match('/[¥￥]\s?([\d,]+)/u', $text, $m)) {
-                    $total = (int)str_replace(',', '', $m[1]);
-                    $stop = true; continue;
-                }
+            // 1. 开启点：看到“領収証”，才开始正式识别商品
+            if (preg_match('/領\s*収\s*証/u', $text)) {
+                $is_after_header = true; continue;
             }
 
-            // B. 商品逻辑：抓取包含 ¥ 的行，且排除掉垃圾词
-            if (preg_match('/[¥￥]\s?([\d,]+)/u', $text, $m)) {
-                $price = (int)str_replace(',', '', $m[1]);
-                
-                // 排除消费税、余额等干扰行
-                if (preg_match('/(消费税|残高|支払|番号|対象|领収)/u', $text)) continue;
+            if (!$is_after_header || $is_total_done) continue;
 
-                // 提取名称：去掉价格部分和特殊符号
-                $name = preg_replace('/[¥￥]\s?([\d,]+)/u', '', $text);
-                $name = trim(str_replace(['＊', '*', '轻'], '', $name));
+            // 2. 识别合计：一旦看到“合計”，抓完数立马走人，后面什么都不看
+            if (preg_match('/合計/u', $text)) {
+                if (preg_match('/([\d,]+)/', $text, $m)) {
+                    $total = (int)str_replace(',', '', $m[1]);
+                    $is_total_done = true; // 彻底锁死
+                }
+                continue;
+            }
 
-                if (mb_strlen($name) > 1) {
-                    $items[] = ['name' => $name, 'price' => $price];
+            // 3. 识别商品：包含 ¥ 的行，且只要文字和数字
+            if (preg_match('/[¥￥]/u', $text)) {
+                // 排除干扰行（比如消费税这类虽然带¥但不是商品的内容）
+                if (preg_match('/(税|対象|支払)/u', $text)) continue;
+
+                // 提取：把名字和价格分出来
+                // 格式如：◎チョコバターメロンパ ¥168轻
+                if (preg_match('/^(.*?)[¥￥]\s?([\d,]+)/u', $text, $m)) {
+                    $rawName = trim($m[1]);
+                    $price = (int)str_replace(',', '', $m[2]);
+
+                    // 清洗名字：去掉末尾多余的符号
+                    $cleanName = str_replace(['＊', '*', '轻'], '', $rawName);
+                    
+                    if (!empty($cleanName)) {
+                        $items[] = ['name' => $cleanName, 'price' => $price];
+                    }
                 }
             }
         }
-        $results[] = ['file' => $fileName, 'items' => $items, 'total' => $total];
+        $results[] = ['file' => $_FILES['receipts']['name'][$key], 'items' => $items, 'total' => $total];
     }
-    file_put_contents('ocr_log.txt', $log_content);
-    file_put_contents('last_data.json', json_encode($results));
 }
 ?>
 
 <!DOCTYPE html>
-<html lang="zh">
+<html>
 <head>
     <meta charset="UTF-8">
-    <title>收据一键扫描</title>
+    <title>FamilyMart 专用解析</title>
     <style>
-        body { font-family: sans-serif; background: #f0f2f5; padding: 20px; margin: 0; }
-        .box { max-width: 500px; margin: auto; background: white; padding: 25px; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
-        .receipt { border-left: 6px solid #00a95c; background: #f9f9f9; padding: 15px; margin: 20px 0; border-radius: 4px; }
-        .row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px dashed #ddd; color: #333; }
-        .total { text-align: right; color: #e53935; font-size: 24px; font-weight: bold; margin-top: 15px; }
-        .btn { background: #007aff; color: white; border: none; padding: 15px; width: 100%; border-radius: 8px; font-size: 16px; cursor: pointer; }
-        .dl-bar { display: flex; gap: 10px; margin-top: 20px; }
-        .dl-btn { flex: 1; text-align: center; text-decoration: none; padding: 10px; border-radius: 5px; font-size: 14px; color: white; }
+        body { font-family: sans-serif; background: #f4f4f4; padding: 20px; }
+        .receipt-box { max-width: 400px; margin: 20px auto; background: white; padding: 20px; border: 1px solid #ddd; border-radius: 8px; }
+        .item-line { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px dashed #eee; }
+        .total-line { margin-top: 15px; text-align: right; color: #d32f2f; font-size: 22px; font-weight: bold; }
+        .header { text-align: center; border-bottom: 2px solid #333; padding-bottom: 10px; margin-bottom: 10px; }
     </style>
 </head>
 <body>
-    <div class="box">
-        <h2>🧾 小票扫描器</h2>
+    <div style="text-align:center;">
         <form method="post" enctype="multipart/form-data">
-            <input type="file" name="receipts[]" multiple><br><br>
-            <button type="submit" class="btn">开始扫描所有图片</button>
+            <input type="file" name="receipts[]" multiple>
+            <button type="submit">解析这些小票</button>
         </form>
-
-        <?php foreach ($results as $res): ?>
-            <div class="receipt">
-                <small style="color:#999;">📄 <?=$res['file']?></small>
-                <?php foreach ($res['items'] as $it): ?>
-                    <div class="row">
-                        <span><?= htmlspecialchars($it['name']) ?></span>
-                        <span>¥<?= number_format($it['price']) ?></span>
-                    </div>
-                <?php endforeach; ?>
-                <div class="total">合计 ¥<?= number_format($res['total']) ?></div>
-            </div>
-        <?php endforeach; ?>
-
-        <?php if($results): ?>
-            <div class="dl-bar">
-                <a href="?download=csv" class="dl-btn" style="background:#28a745">下载 CSV</a>
-                <a href="?download=log" class="dl-btn" style="background:#6c757d">下载日志</a>
-            </div>
-        <?php endif; ?>
     </div>
+
+    <?php foreach ($results as $res): ?>
+        <div class="receipt-box">
+            <div class="header">解析结果：<?=$res['file']?></div>
+            <?php foreach ($res['items'] as $it): ?>
+                <div class="item-line">
+                    <span><?= htmlspecialchars($it['name']) ?></span>
+                    <span>¥<?= number_format($it['price']) ?></span>
+                </div>
+            <?php endforeach; ?>
+            <div class="total-line">总计 ¥<?= number_format($res['total']) ?></div>
+        </div>
+    <?php endforeach; ?>
 </body>
 </html>
