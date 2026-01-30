@@ -29,7 +29,6 @@ try {
                     created_at DATETIME DEFAULT GETDATE()
                 )");
 } catch (PDOException $e) {
-    // 接続エラーが起きても画面自体は表示させるために、dieではなくエラー表示に留める
     $dbError = $e->getMessage();
 }
 
@@ -42,7 +41,8 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
         if (empty($tmpName)) continue;
         $fileName = $_FILES['receipts']['name'][$key];
 
-        $apiUrl = rtrim($endpoint, '/') . "/computervision/imageanalysis:analyze?api-version=2023-02-01-preview&features=read";
+        // 最新のAPIバージョン (v4.0 GA) に変更
+        $apiUrl = rtrim($endpoint, '/') . "/computervision/imageanalysis:analyze?api-version=2023-10-01&features=read";
         $imageData = file_get_contents($tmpName);
 
         $ch = curl_init($apiUrl);
@@ -59,21 +59,27 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
         $data = json_decode($response, true);
         $logData .= "File: $fileName - Response: " . $response . "\n";
 
-        $lines = $data['readResult']['blocks'][0]['lines'] ?? [];
+        // Read API v4.0のレスポンス構造に対応
+        $content = $data['readResult']['content'] ?? "";
+        $lines = explode("\n", $content);
+        
         $currentFileItems = [];
         $extractedTotal = 0;
 
         foreach ($lines as $line) {
-            $text = $line['content'];
-            $cleanText = str_replace(['軽', '＊', '*', '◎'], '', $text);
-
-            if (preg_match('/(.*?)\s*[¥|￥]\s*([\d,]+)/u', $cleanText, $matches)) {
+            // 不要な文字（軽、＊、*、(、)など）を徹底除去
+            $cleanLine = str_replace(['軽', '＊', '*', '(', ')', '（', '）'], '', $line);
+            
+            // 商品名と価格の抽出ロジック (例: ザバスプロテイン ¥247)
+            if (preg_match('/(.*?)\s*[¥|￥]\s*([\d,]+)/u', $cleanLine, $matches)) {
                 $name = trim($matches[1]);
                 $price = (int)str_replace(',', '', $matches[2]);
 
-                if (strpos($name, '合計') !== false) {
+                // 「合計」が含まれる行か判断
+                if (mb_strpos($name, '合計') !== false || mb_strpos($name, '合 計') !== false) {
                     $extractedTotal = $price;
-                } elseif (!empty($name) && $name !== "合計") {
+                } elseif (!empty($name) && !preg_match('/消費税|対象|支払|残高|登録番号/u', $name)) {
+                    // 純粋な商品名だけを抽出
                     $currentFileItems[] = ['name' => $name, 'price' => $price];
                     if (isset($pdo)) {
                         $stmt = $pdo->prepare("INSERT INTO ReceiptItems (filename, item_name, price, is_total) VALUES (?, ?, ?, 0)");
@@ -83,6 +89,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
                 }
             }
         }
+        
         if ($extractedTotal > 0 && isset($pdo)) {
             $stmt = $pdo->prepare("INSERT INTO ReceiptItems (filename, item_name, price, is_total) VALUES (?, '合計', ?, 1)");
             $stmt->execute([$fileName, $extractedTotal]);
@@ -108,7 +115,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
         .container { max-width: 600px; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin: auto; }
         .error { color: red; background: #fee; padding: 10px; border-radius: 4px; margin-bottom: 10px; }
         .result { border-bottom: 1px solid #ccc; padding: 10px 0; }
-        .btn { display: inline-block; padding: 8px 16px; background: #0078d4; color: white; text-decoration: none; border-radius: 4px; border: none; cursor: pointer; }
+        .btn { display: inline-block; padding: 10px 20px; background: #0078d4; color: white; text-decoration: none; border-radius: 4px; border: none; cursor: pointer; }
     </style>
 </head>
 <body>
@@ -116,7 +123,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
         <h2>レシート解析システム</h2>
         
         <?php if (isset($dbError)): ?>
-            <div class="error">【DB接続警告】<?php echo htmlspecialchars($dbError); ?><br>※ファイアウォールの設定を確認してください。</div>
+            <div class="error">【DB接続エラー】<?php echo htmlspecialchars($dbError); ?></div>
         <?php endif; ?>
 
         <form action="" method="post" enctype="multipart/form-data">
@@ -129,16 +136,20 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
             <h3>解析結果</h3>
             <?php foreach ($results as $res): ?>
                 <div class="result">
-                    <strong><?php echo htmlspecialchars($res['file']); ?></strong><br>
-                    <?php foreach ($res['items'] as $i): ?>
-                        <?php echo htmlspecialchars($i['name']); ?> ¥<?php echo number_format($i['price']); ?>, 
-                    <?php endforeach; ?>
+                    <strong>📄 <?php echo htmlspecialchars($res['file']); ?></strong><br>
+                    <?php 
+                    $disp = [];
+                    foreach ($res['items'] as $i) {
+                        $disp[] = htmlspecialchars($i['name']) . " ¥" . number_format($i['price']);
+                    }
+                    echo implode(", ", $disp);
+                    ?>
                     <br><strong>合計 ¥<?php echo number_format($res['total']); ?></strong>
                 </div>
             <?php endforeach; ?>
             <p>
-                <a href="receipt_data.csv" download>CSVダウンロード</a> | 
-                <a href="ocr.log" target="_blank">ログ確認</a>
+                <a href="receipt_data.csv" download class="btn" style="background: #28a745;">CSVダウンロード</a>
+                <a href="ocr.log" target="_blank" class="btn" style="background: #6c757d;">ログ確認</a>
             </p>
         <?php endif; ?>
     </div>
