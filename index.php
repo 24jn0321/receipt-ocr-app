@@ -24,36 +24,49 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
         $lines = $data['readResult']['blocks'][0]['lines'] ?? [];
         
         $currentFileItems = [];
-        $sumAmount = 0; // 新增：用于存放累加的商品总和
+        $sumAmount = 0;
 
         for ($i = 0; $i < count($lines); $i++) {
             $text = trim($lines[$i]['text']);
+            $noSpaceText = str_replace([' ', '　'], '', $text);
 
-            // 1. 商品提取逻辑（保留你原本认为好用的过滤词）
-            if (!preg_match('/[¥￥]/u', $text) && 
-                !preg_match('/Family|新宿|电话|登録|2024|レジ|領収|対象|消費税|支払|残高|証|単価/u', $text) &&
-                mb_strlen($text) >= 2) {
+            // 过滤黑名单：如果是消费税、支付方式、残高等，直接跳过整行
+            if (preg_match('/Family|新宿|电话|登録|2024|レジ|領収|対象|消費税|支払|残高|証|単価/u', $noSpaceText)) {
+                continue;
+            }
+
+            // --- 核心修改：增加对“同一行有名字和钱”的处理 ---
+            
+            // 情况 A: 名字和钱在【同一行】 (如：アポロチョコレート ¥198)
+            if (preg_match('/^(.*)[¥￥]([\d,]+)/u', $text, $matches)) {
+                $name = trim(str_replace(['＊', '*', '轻', '軽', '◎'], '', $matches[1]));
+                $price = (int)str_replace(',', '', $matches[2]);
                 
+                if (mb_strlen($name) >= 2 && $price > 0) {
+                    $currentFileItems[] = ['name' => $name, 'price' => $price];
+                    $sumAmount += $price;
+                    continue; // 处理完这一行，跳过
+                }
+            }
+
+            // 情况 B: 名字在这一行，钱在【下一行】 (你之前的逻辑)
+            if (!preg_match('/[¥￥]/u', $text) && mb_strlen($text) >= 2) {
                 if (isset($lines[$i + 1])) {
                     $nextText = $lines[$i + 1]['text'];
-                    // 修正：更精准地提取 ¥ 后的数字，去掉“轻”等干扰
                     if (preg_match('/[¥￥]([\d,]+)/u', $nextText, $matches)) {
                         $price = (int)str_replace(',', '', $matches[1]);
                         
-                        // 排除杂项金额（消费税等，即使在下一行也要过滤）
+                        // 确保下一行不是消费税或余额
                         if (!preg_match('/消費税|対象|残高|支払/u', $nextText)) {
-                            $cleanName = str_replace(['＊', '*', '轻', '軽'], '', $text);
+                            $cleanName = str_replace(['＊', '*', '轻', '軽', '◎'], '', $text);
                             $currentFileItems[] = ['name' => trim($cleanName), 'price' => $price];
-                            
-                            $sumAmount += $price; // 关键：把每个商品的单价加起来
-                            $i++; 
-                            continue;
+                            $sumAmount += $price;
+                            $i++; // 跳过下一行（因为钱已经拿到了）
                         }
                     }
                 }
             }
         }
-        // 直接用累加的金额作为最终合计，解决 ¥0 或合计错误的问题
         $results[] = ['file' => $fileName, 'items' => $currentFileItems, 'total' => $sumAmount];
     }
 }
@@ -63,29 +76,29 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <title>收据解析修复版</title>
+    <title>收据解析最终版</title>
     <style>
         body { font-family: sans-serif; background: #f4f7f6; padding: 20px; }
         .container { max-width: 700px; margin: auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
         .receipt-result { border-left: 6px solid #00a95c; background: #fdfdfd; padding: 15px; margin-bottom: 20px; }
         .item-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px dashed #ddd; }
         .total-row { font-size: 1.6em; font-weight: bold; color: #d32f2f; margin-top: 15px; text-align: right; }
-        .btn { padding: 10px 20px; background: #0078d4; color: white; border: none; border-radius: 5px; cursor: pointer; }
+        .btn { padding: 10px 20px; background: #0078d4; color: white; border: none; border-radius: 5px; cursor: pointer; width: 100%; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h2>收据解析系统</h2>
+        <h2 style="text-align:center;">📑 收据智能解析系统</h2>
         <form action="" method="post" enctype="multipart/form-data">
-            <input type="file" name="receipts[]" multiple accept="image/*">
-            <button type="submit" class="btn">执行解析</button>
+            <input type="file" name="receipts[]" multiple accept="image/*"><br><br>
+            <button type="submit" class="btn">开始扫描</button>
         </form>
 
         <?php if (!empty($results)): ?>
             <hr>
             <?php foreach ($results as $res): ?>
                 <div class="receipt-result">
-                    <p style="color: #666;">📄 <?php echo htmlspecialchars($res['file']); ?></p>
+                    <p style="color: #666; font-size:12px;">📄 <?php echo htmlspecialchars($res['file']); ?></p>
                     <?php foreach ($res['items'] as $i): ?>
                         <div class="item-row">
                             <span><?php echo htmlspecialchars($i['name']); ?></span>
