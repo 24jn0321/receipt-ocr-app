@@ -4,9 +4,11 @@ $apiKey   = "BQGkM056pMBAB5KVI6wmcSLBf2JlF8X2UUiwxw5N17K9QmWljMG3JQQJ99CAACi0881
 
 $results = [];
 
-// 下载处理
+// --- 1. 下载处理 (CSV 和 日志) ---
 if (isset($_GET['action'])) {
     $sessionData = file_exists('ocr_data.json') ? json_decode(file_get_contents('ocr_data.json'), true) : [];
+    
+    // CSV 下载
     if ($_GET['action'] == 'csv') {
         header('Content-Type: text/csv; charset=utf-8');
         header('Content-Disposition: attachment; filename=receipt.csv');
@@ -19,8 +21,16 @@ if (isset($_GET['action'])) {
         }
         fclose($output); exit;
     }
+    
+    // 日志下载 (JSON格式，方便调试)
+    if ($_GET['action'] == 'log') {
+        header('Content-Type: application/json; charset=utf-8');
+        header('Content-Disposition: attachment; filename=ocr_debug.json');
+        echo json_encode($sessionData, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE); exit;
+    }
 }
 
+// --- 2. OCR 解析逻辑 ---
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
     foreach ($_FILES['receipts']['tmp_name'] as $key => $tmpName) {
         if (empty($tmpName)) continue;
@@ -46,31 +56,34 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
             $text = trim($lines[$i]['text']);
             $noSpace = str_replace([' ', '　', '=', '-', '_', '＊', '*', '◎'], '', $text);
 
-            // 1. 核心防御：一旦进入结算区（合计/支付/残高），立刻停止抓取商品
-            if (preg_match('/合计|合計|支付|支払|残高|番号|カード|対象|消費税/u', $noSpace)) {
-                // 如果已经抓到过商品，看到这些词就彻底结束
+            // 核心防御：进入结算区立刻停止
+            if (preg_match('/合计|合計|支付|支払|残高|番号|カード/u', $noSpace)) {
                 if (!empty($currentItems)) $stopFlag = true; 
                 continue; 
             }
-            
-            if ($stopFlag) continue; // 已经在结算区了，后面的行都不看
+            if ($stopFlag) continue;
 
-            // 2. 识别带 ¥ 的行
+            // 识别带 ¥ 的行
             if (preg_match('/[¥￥]([\d,]+)/u', $text, $matches)) {
                 $price = (int)str_replace(',', '', $matches[1]);
                 
-                // 尝试提取本行名字
+                // --- 提取名字逻辑修正 ---
                 $name = trim(preg_replace('/[\.．…]+|[¥￥].*$/u', '', $text));
                 
-                // 【针对3号及所有小票】：如果本行没抓到名字，就取上一行
-                if (mb_strlen($name) < 2 && $i > 0) {
-                    $name = trim($lines[$i-1]['text']);
+                // 如果本行名字太短，或者本行是“对象/税”，则往上找一行
+                // 这是为了兼容小票3：8%对象 ¥198 这种情况
+                if (mb_strlen($name) < 2 || preg_match('/对象|対象|消費税/u', $name)) {
+                    if ($i > 0) {
+                        $potentialName = trim($lines[$i-1]['text']);
+                        // 如果上一行不是抬头信息，才采用
+                        if (!preg_match('/領収|领收|Family|新宿/u', $potentialName)) {
+                            $name = $potentialName;
+                        }
+                    }
                 }
 
-                // 清洗名字
                 $cleanName = str_replace(['＊', '*', '轻', '軽', '◎', '(', '（', ')', '）', '.', '．', '…'], '', $name);
                 
-                // 排除一些误抓的地址或标题
                 if (mb_strlen($cleanName) >= 2 && !preg_match('/Family|新宿|电话|登録|領収/u', $cleanName)) {
                     $currentItems[] = ['name' => $cleanName, 'price' => $price];
                     $sumAmount += $price;
@@ -94,12 +107,14 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
         .card { border-left: 5px solid #00a95c; background: #fdfdfd; padding: 15px; margin-top: 15px; }
         .row { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px dashed #ddd; }
         .total { font-size: 22px; font-weight: bold; color: #d32f2f; text-align: right; margin-top: 10px; }
-        .btn { width: 100%; padding: 10px; background: #0078d4; color: white; border: none; cursor: pointer; border-radius: 4px; }
+        .btn { width: 100%; padding: 10px; background: #0078d4; color: white; border: none; cursor: pointer; border-radius: 4px; font-weight: bold; }
+        .footer-links { text-align: center; margin-top: 25px; border-top: 1px solid #eee; padding-top: 15px; }
+        .footer-links a { margin: 0 15px; text-decoration: none; color: #0078d4; font-size: 14px; }
     </style>
 </head>
 <body>
     <div class="box">
-        <h2 style="text-align:center;">🧾 小票解析系统 (全兼容版)</h2>
+        <h2 style="text-align:center;">🧾 小票解析系统</h2>
         <form method="post" enctype="multipart/form-data">
             <input type="file" name="receipts[]" multiple><br><br>
             <button type="submit" class="btn">解析全部图片</button>
@@ -118,7 +133,11 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
                     <div class="total">合计 ¥<?= number_format($res['total']) ?></div>
                 </div>
             <?php endforeach; ?>
-            <p style="text-align:center;"><a href="?action=csv">📥 下载 CSV 报表</a></p>
+
+            <div class="footer-links">
+                <a href="?action=csv">📥 下载 CSV 报表</a>
+                <a href="?action=log">📜 下载识别日志</a>
+            </div>
         <?php endif; ?>
     </div>
 </body>
