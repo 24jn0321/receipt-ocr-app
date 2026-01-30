@@ -69,4 +69,33 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
         .container { max-width: 700px; margin: auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
         .receipt-result { border-left: 6px solid #00a95c; background: #fdfdfd; padding: 15px; margin-bottom: 20px; }
         .item-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px dashed #ddd; }
-        .total-
+        .total-row { font-size: 1.6em; font-weight: bold; color: #d32f2f; margin-top: 15px; text-align: right; }
+        .btn { padding: 10px 20px; background: #0078d4; color: white; border: none; border-radius: 5px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>收据解析系统</h2>
+        <form action="" method="post" enctype="multipart/form-data">
+            <input type="file" name="receipts[]" multiple accept="image/*">
+            <button type="submit" class="btn">执行解析</button>
+        </form>
+
+        <?php if (!empty($results)): ?>
+            <hr>
+            <?php foreach ($results as $res): ?>
+                <div class="receipt-result">
+                    <p style="color: #666;">📄 <?php echo htmlspecialchars($res['file']); ?></p>
+                    <?php foreach ($res['items'] as $i): ?>
+                        <div class="item-row">
+                            <span><?php echo htmlspecialchars($i['name']); ?></span>
+                            <span>¥<?php echo number_format($i['price']); ?></span>
+                        </div>
+                    <?php endforeach; ?>
+                    <div class="total-row">合计 ¥<?php echo number_format($res['total']); ?></div>
+                </div>
+            <?php endforeach; ?>
+        <?php endif; ?>
+    </div>
+</body>
+</html>
