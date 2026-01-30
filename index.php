@@ -1,83 +1,119 @@
 <?php
+// 请确保你的 Endpoint 对应 Document Intelligence 的地址
 $endpoint = "https://24jn0321.cognitiveservices.azure.com/"; 
 $apiKey   = "BQGkM056pMBAB5KVI6wmcSLBf2JlF8X2UUiwxw5N17K9QmWljMG3JQQJ99CAACi0881XJ3w3AAAFACOGrT37";
 
 $results = [];
 
+// CSV 下载逻辑
+if (isset($_GET['dl']) && file_exists('data.json')) {
+    $data = json_decode(file_get_contents('data.json'), true);
+    header('Content-Type: text/csv; charset=UTF-8');
+    header('Content-Disposition: attachment; filename=receipt.csv');
+    echo "\xEF\xBB\xBF"; 
+    $f = fopen('php://output', 'w');
+    fputcsv($f, ['文件', '商品', '金额']);
+    foreach($data as $r) {
+        foreach($r['items'] as $it) fputcsv($f, [$r['file'], $it['name'], $it['price']]);
+        fputcsv($f, [$r['file'], '合计', $r['total']]);
+    }
+    fclose($f); exit;
+}
+
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
     foreach ($_FILES['receipts']['tmp_name'] as $key => $tmpName) {
         if (empty($tmpName)) continue;
+        
+        // 注意：API 路径变更为 documentintelligence
+        $apiUrl = rtrim($endpoint, '/') . "/documentintelligence/documentModels/prebuilt-receipt:analyze?api-version=2023-10-31-preview";
+
         $imgData = file_get_contents($tmpName);
-        $apiUrl = rtrim($endpoint, '/') . "/computervision/imageanalysis:analyze?api-version=2023-10-01&features=read";
         $ch = curl_init($apiUrl);
         curl_setopt($ch, CURLOPT_POST, true);
-        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/octet-stream', 'Ocp-Apim-Subscription-Key: ' . $apiKey]);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+            'Content-Type: application/octet-stream',
+            'Ocp-Apim-Subscription-Key: ' . $apiKey
+        ]);
         curl_setopt($ch, CURLOPT_POSTFIELDS, $imgData);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        $resp = curl_exec($ch); curl_close($ch);
-        
-        $json = json_decode($resp, true);
-        $lines = $json['readResult']['blocks'][0]['lines'] ?? [];
+        curl_setopt($ch, CURLOPT_HEADER, true); // 需要获取 Operation-Location
+        $response = curl_exec($ch);
+        $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+        $headers = substr($response, 0, $headerSize);
+        curl_close($ch);
 
-        $items = []; $total = 0;
-        $in_product_zone = false;
-
-        foreach ($lines as $line) {
-            $text = str_replace([' ', '　'], '', $line['text']);
-
-            // 1. 开启商品区：看到“領収証”开始抓
-            if (mb_strpos($text, '領収証') !== false) { $in_product_zone = true; continue; }
-
-            // 2. 抓合计并结束：看到“合計”拿钱，然后彻底关掉该图的处理
-            if (mb_strpos($text, '合計') !== false) {
-                if (preg_match('/(\d{1,3}(,\d{3})*)/', $text, $m)) {
-                    $total = (int)str_replace(',', '', $m[1]);
-                    $in_product_zone = false; break; 
-                }
+        // 获取异步查询地址
+        if (preg_match('/Operation-Location: (.*)/i', $headers, $matches)) {
+            $resultUrl = trim($matches[1]);
+            // 轮询等待结果 (简单起见，这里循环几次)
+            for ($i = 0; $i < 5; $i++) {
+                sleep(1);
+                $ch = curl_init($resultUrl);
+                curl_setopt($ch, CURLOPT_HTTPHEADER, ['Ocp-Apim-Subscription-Key: ' . $apiKey]);
+                curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+                $resJson = curl_exec($ch);
+                curl_close($ch);
+                $data = json_decode($resJson, true);
+                if ($data['status'] == 'succeeded') break;
             }
 
-            // 3. 抓商品：只在商品区内，且包含 ¥ 
-            if ($in_product_zone && mb_strpos($text, '¥') !== false) {
-                // 排除你画红框的那些（消费税、対象等）
-                if (preg_match('/(消費税|対象|支払|番号|再発行)/u', $text)) continue;
-
-                $parts = explode('¥', $line['text']);
-                if (count($parts) >= 2) {
-                    $name = trim(str_replace(['＊', '*', '轻', '◎'], '', $parts[0]));
-                    if (preg_match('/(\d+)/', $parts[1], $m)) {
-                        $price = (int)$m[1];
-                        if (!empty($name) && $price > 0) {
-                            $items[] = ['name' => (strpos($line['text'], '◎') !== false ? '◎' : '') . $name, 'price' => $price];
-                        }
-                    }
+            // 解析 DI 返回的结构化数据
+            $receipt = $data['analyzeResult']['documents'][0]['fields'] ?? [];
+            $items = [];
+            if (isset($receipt['Items']['valueArray'])) {
+                foreach ($receipt['Items']['valueArray'] as $val) {
+                    $item = $val['valueObject'];
+                    $items[] = [
+                        'name'  => $item['Description']['valueString'] ?? '未知商品',
+                        'price' => $item['TotalPrice']['valueCurrency']['amount'] ?? 0
+                    ];
                 }
             }
+            $total = $receipt['Total']['valueCurrency']['amount'] ?? 0;
+            $results[] = ['file' => $_FILES['receipts']['name'][$key], 'items' => $items, 'total' => $total];
         }
-        $results[] = ['file' => $_FILES['receipts']['name'][$key], 'items' => $items, 'total' => $total];
     }
+    file_put_contents('data.json', json_encode($results));
 }
 ?>
 <!DOCTYPE html>
-<html>
+<html lang="zh">
 <head>
     <meta charset="UTF-8">
-    <title>小票解析最终修正版</title>
+    <title>DI 高级解析版</title>
     <style>
-        body { font-family: sans-serif; background: #f4f4f9; padding: 20px; }
-        .box { max-width: 500px; margin: auto; background: #fff; padding: 25px; border-radius: 12px; box-shadow: 0 5px 15px rgba(0,0,0,0.1); }
-        .btn { width: 100%; padding: 15px; background: #007bff; color: white; border: none; border-radius: 8px; font-size: 18px; cursor: pointer; }
-        .res-card { border-left: 5px solid #28a745; background: #f9f9f9; padding: 15px; margin-top: 20px; }
-        .row { display: flex; justify-content: space-between; border-bottom: 1px dashed #ddd; padding: 10px 0; }
-        .total-val { text-align: right; color: #dc3545; font-size: 26px; font-weight: bold; margin-top: 15px; }
+        body { font-family: sans-serif; background: #f0f2f5; padding: 20px; }
+        .container { max-width: 500px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
+        .card { border-left: 5px solid #007bff; background: #f8f9fa; padding: 15px; margin-top: 15px; border-radius: 4px; }
+        .row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px dashed #ccc; }
+        .total { text-align: right; color: #d32f2f; font-size: 24px; font-weight: bold; margin-top: 10px; }
+        .btn { width: 100%; padding: 12px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; }
     </style>
 </head>
 <body>
-    <div class="box">
-        <h2 style="text-align:center;">📑 小票解析准确版</h2>
+    <div class="container">
+        <h2 style="text-align:center;">🧾 Document Intelligence 版</h2>
         <form method="post" enctype="multipart/form-data">
             <input type="file" name="receipts[]" multiple><br><br>
-            <button type="submit" class="btn">开始扫描</button>
+            <button type="submit" class="btn">开始智能识别</button>
         </form>
+
         <?php foreach ($results as $res): ?>
-            <div class="res-card">
-                <small style="color:#999;"><?
+            <div class="card">
+                <div style="font-size:12px; color:#666;"><?= htmlspecialchars($res['file']) ?></div>
+                <?php foreach ($res['items'] as $it): ?>
+                    <div class="row">
+                        <span><?= htmlspecialchars($it['name']) ?></span>
+                        <span>¥<?= number_format($it['price']) ?></span>
+                    </div>
+                <?php endforeach; ?>
+                <div class="total">合计 ¥<?= number_format($res['total']) ?></div>
+            </div>
+        <?php endforeach; ?>
+
+        <?php if($results): ?>
+            <p style="text-align:center; margin-top:20px;"><a href="?dl=csv">📥 下载 CSV 报表</a></p>
+        <?php endif; ?>
+    </div>
+</body>
+</html>
