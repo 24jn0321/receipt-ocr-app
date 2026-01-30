@@ -1,12 +1,38 @@
 <?php
+// Azure 配置
 $endpoint = "https://24jn0321.cognitiveservices.azure.com/"; 
 $apiKey   = "BQGkM056pMBAB5KVI6wmcSLBf2JlF8X2UUiwxw5N17K9QmWljMG3JQQJ99CAACi0881XJ3w3AAAFACOGrT37";
 
 $results = [];
 
+// --- 1. 下载处理 ---
+if (isset($_GET['download'])) {
+    if ($_GET['download'] == 'log' && file_exists('ocr_log.txt')) {
+        header('Content-Type: text/plain');
+        header('Content-Disposition: attachment; filename=receipt_log.txt');
+        readfile('ocr_log.txt'); exit;
+    }
+    if ($_GET['download'] == 'csv' && file_exists('last_data.json')) {
+        $data = json_decode(file_get_contents('last_data.json'), true);
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename=data.csv');
+        echo "\xEF\xBB\xBF"; // 防止Excel乱码
+        $f = fopen('php://output', 'w');
+        fputcsv($f, ['文件名', '商品名', '价格']);
+        foreach($data as $r) {
+            foreach($r['items'] as $it) fputcsv($f, [$r['file'], $it['name'], $it['price']]);
+            fputcsv($f, [$r['file'], '--- 合计 ---', $r['total']]);
+        }
+        fclose($f); exit;
+    }
+}
+
+// --- 2. 识别处理 ---
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
+    $log_content = "";
     foreach ($_FILES['receipts']['tmp_name'] as $key => $tmpName) {
         if (empty($tmpName)) continue;
+        $fileName = $_FILES['receipts']['name'][$key];
 
         $apiUrl = rtrim($endpoint, '/') . "/computervision/imageanalysis:analyze?api-version=2023-10-01&features=read";
         $imgData = file_get_contents($tmpName);
@@ -19,52 +45,44 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
         $resp = curl_exec($ch);
         curl_close($ch);
 
+        $log_content .= "FILE: $fileName\n" . $resp . "\n\n";
         $json = json_decode($resp, true);
         $lines = $json['readResult']['blocks'][0]['lines'] ?? [];
 
-        $items = [];
-        $total = 0;
-        $scan_stop = false; // 核心开关：一旦找到合计，彻底停止后续所有抓取
+        $items = []; $total = 0; $stop = false;
 
-        for ($i = 0; $i < count($lines); $i++) {
-            if ($scan_stop) break;
+        foreach ($lines as $line) {
+            if ($stop) break;
+            $text = trim($line['text']);
 
-            $text = trim($lines[$i]['text']);
-
-            // 1. 识别“合计”：这是最高优先级，一旦发现，提取金额并立刻“封笔”
+            // A. 合计逻辑：看到“合计”或“小计”，抓数字并关停
             if (preg_match('/(合計|合\s*計|小計|计)/u', $text)) {
-                // 在同一行或紧接着的下一行找数字
-                $combined_text = $text . ($lines[$i+1]['text'] ?? '');
-                if (preg_match('/[¥￥]\s?([\d,]+)/u', $combined_text, $m)) {
+                if (preg_match('/[¥￥]\s?([\d,]+)/u', $text, $m)) {
                     $total = (int)str_replace(',', '', $m[1]);
-                    $scan_stop = true; // 锁定合计，后面所有的东西（消费税、余额等）全部不要
-                    continue;
+                    $stop = true; continue;
                 }
             }
 
-            // 2. 识别“红框商品”：只在还没找到合计之前运行
-            // 过滤干扰词：过滤店名、时间、电话、注册号、领收证、消费税
-            if (!$scan_stop && 
-                !preg_match('/Family|新宿|电话|2024|证|号|店|领収|対象|消费税|残高|支払/u', $text) && 
-                mb_strlen($text) > 2) {
+            // B. 商品逻辑：抓取包含 ¥ 的行，且排除掉垃圾词
+            if (preg_match('/[¥￥]\s?([\d,]+)/u', $text, $m)) {
+                $price = (int)str_replace(',', '', $m[1]);
                 
-                // 检查下一行是否有 ¥ 价格
-                if (isset($lines[$i+1]) && preg_match('/[¥￥]\s?([\d,]+)/u', $lines[$i+1]['text'], $m)) {
-                    $price = (int)str_replace(',', '', $m[1]);
-                    
-                    // 清理名称，只留下干净的商品名
-                    $cleanName = str_replace(['＊', '*', '轻'], '', $text);
-                    
-                    $items[] = [
-                        'name' => trim($cleanName),
-                        'price' => $price
-                    ];
-                    $i++; // 跳过价格行，进入下一循环
+                // 排除消费税、余额等干扰行
+                if (preg_match('/(消费税|残高|支払|番号|対象|领収)/u', $text)) continue;
+
+                // 提取名称：去掉价格部分和特殊符号
+                $name = preg_replace('/[¥￥]\s?([\d,]+)/u', '', $text);
+                $name = trim(str_replace(['＊', '*', '轻'], '', $name));
+
+                if (mb_strlen($name) > 1) {
+                    $items[] = ['name' => $name, 'price' => $price];
                 }
             }
         }
-        $results[] = ['items' => $items, 'total' => $total];
+        $results[] = ['file' => $fileName, 'items' => $items, 'total' => $total];
     }
+    file_put_contents('ocr_log.txt', $log_content);
+    file_put_contents('last_data.json', json_encode($results));
 }
 ?>
 
@@ -72,34 +90,45 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
 <html lang="zh">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>精准小票识别</title>
+    <title>收据一键扫描</title>
     <style>
-        body { font-family: -apple-system, sans-serif; background: #f0f2f5; display: flex; justify-content: center; padding: 20px; }
-        .card { width: 100%; max-width: 400px; background: white; padding: 20px; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
-        .item-row { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px dashed #eee; font-size: 16px; color: #333; }
-        .total-row { margin-top: 20px; text-align: right; color: #e53935; font-size: 24px; font-weight: 900; }
-        .upload-btn { background: #007aff; color: white; border: none; padding: 12px; width: 100%; border-radius: 8px; font-size: 16px; cursor: pointer; }
+        body { font-family: sans-serif; background: #f0f2f5; padding: 20px; margin: 0; }
+        .box { max-width: 500px; margin: auto; background: white; padding: 25px; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+        .receipt { border-left: 6px solid #00a95c; background: #f9f9f9; padding: 15px; margin: 20px 0; border-radius: 4px; }
+        .row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px dashed #ddd; color: #333; }
+        .total { text-align: right; color: #e53935; font-size: 24px; font-weight: bold; margin-top: 15px; }
+        .btn { background: #007aff; color: white; border: none; padding: 15px; width: 100%; border-radius: 8px; font-size: 16px; cursor: pointer; }
+        .dl-bar { display: flex; gap: 10px; margin-top: 20px; }
+        .dl-btn { flex: 1; text-align: center; text-decoration: none; padding: 10px; border-radius: 5px; font-size: 14px; color: white; }
     </style>
 </head>
 <body>
-    <div class="card">
+    <div class="box">
+        <h2>🧾 小票扫描器</h2>
         <form method="post" enctype="multipart/form-data">
-            <input type="file" name="receipts[]" multiple style="margin-bottom:15px;"><br>
-            <button type="submit" class="upload-btn">扫 描</button>
+            <input type="file" name="receipts[]" multiple><br><br>
+            <button type="submit" class="btn">开始扫描所有图片</button>
         </form>
 
         <?php foreach ($results as $res): ?>
-            <div style="margin-top:25px; border-top: 2px solid #333; padding-top: 10px;">
+            <div class="receipt">
+                <small style="color:#999;">📄 <?=$res['file']?></small>
                 <?php foreach ($res['items'] as $it): ?>
-                    <div class="item-row">
+                    <div class="row">
                         <span><?= htmlspecialchars($it['name']) ?></span>
                         <span>¥<?= number_format($it['price']) ?></span>
                     </div>
                 <?php endforeach; ?>
-                <div class="total-row">合计 ¥<?= number_format($res['total']) ?></div>
+                <div class="total">合计 ¥<?= number_format($res['total']) ?></div>
             </div>
         <?php endforeach; ?>
+
+        <?php if($results): ?>
+            <div class="dl-bar">
+                <a href="?download=csv" class="dl-btn" style="background:#28a745">下载 CSV</a>
+                <a href="?download=log" class="dl-btn" style="background:#6c757d">下载日志</a>
+            </div>
+        <?php endif; ?>
     </div>
 </body>
 </html>
