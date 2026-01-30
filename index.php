@@ -4,10 +4,10 @@ error_reporting(E_ALL);
 ini_set('display_errors', 1);
 
 /* =====================
-   1. 配置（Azure & DB） - 已套用您的信息
+   1. 配置（Azure & DB）
    ===================== */
-$endpoint = "https://24jn0321.cognitiveservices.azure.com/"; 
-$key      = "BQGkM056pMBAB5KVI6wmcSLBf2JlF8X2UUiwxw5N17K9QmWljMG3JQQJ99CAACi0881XJ3w3AAAFACOGrT37"; 
+$endpoint = "https://receipt-analysis-ai.cognitiveservices.azure.com/"; 
+$key      = "1vWlPmkplbveP5uM5pFtXc13o2PDFk22m5bnKLKUkegBExZtnCo9JQQJ99CAACi0881XJ3w3AAALACOGQtWQ"; 
 
 $serverName = "receipt-server-24jn0.database.windows.net";
 $database   = "receiptdb";
@@ -17,7 +17,7 @@ $password   = "Abc842727925";
 $uploadDir = "uploads/";
 if (!is_dir($uploadDir)) mkdir($uploadDir, 0777, true);
 
-// 数据库连接
+// データベース接続
 try {
     $conn = new PDO("sqlsrv:server=$serverName;Database=$database", $username, $password);
     $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
@@ -62,10 +62,10 @@ function getResult($url, $key) {
 }
 
 /* =====================
-   3. 核心逻辑
+   3. メイン処理
    ===================== */
 $displayItems = [];
-$totalAmountRow = null;
+$totalAmount = 0;
 
 if (!empty($_FILES['images']['tmp_name'][0])) {
     file_put_contents("ocr.log", ""); // ログ初期化
@@ -82,49 +82,30 @@ if (!empty($_FILES['images']['tmp_name'][0])) {
 
             if ($ocr && isset($ocr['analyzeResult']['readResults'])) {
                 foreach ($ocr['analyzeResult']['readResults'] as $page) {
-                    
-                    $isExtracting = false; // 区域抓取开关
-
                     foreach ($page['lines'] as $line) {
                         $text = $line['text'];
-
-                        // 1. 识别到分隔符（等号或虚线）开启抓取
-                        if (preg_match('/[=\-]{3,}/', $text)) {
-                            $isExtracting = true;
-                            continue;
-                        }
-
-                        if ($isExtracting) {
-                            // 2. 正则匹配：[名称] [金额]
-                            if (preg_match('/^(.+?)[ \t　]*[¥￥]?([0-9,]{1,7})/u', $text, $m)) {
-                                $pName = trim($m[1]);
-                                $price = (int)str_replace(',', '', $m[2]);
-
-                                // 识别到“合计”
-                                if (mb_strpos($pName, '合') !== false && mb_strpos($pName, '計') !== false) {
-                                    $totalAmountRow = ['name' => '合计', 'price' => $price];
-                                    $isExtracting = false; // 抓完合计，关闭开关
-                                    continue;
+                        
+                        // 优化后的正则：匹配 [商品名] [空格/无空格] [金额] [轻/税/符号等后缀]
+                        if (preg_match('/^(.+?)[ \t　]*[¥￥]?([0-9,]{2,7})[ \t　]*(軽|轻|.*)?$/u', $text, $m)) {
+                            $pName = trim($m[1]);
+                            $pName = preg_replace('/^[◎*＊]\s*/u', '', $pName); // 清理特殊前缀
+                            $price = (int)str_replace(',', '', $m[2]);
+                            
+                            // 扩展过滤关键词，防止非商品行进入列表
+                            $exclude = ['合計', '小计', '対象', '預り', 'お釣', '現金', '消費税', '再発行', '责No', 'No.', '残高', '番号', 'レジ', '電話'];
+                            $isSkip = false;
+                            foreach ($exclude as $w) { 
+                                if (mb_strpos($pName, $w) !== false) {
+                                    $isSkip = true;
+                                    break;
                                 }
+                            }
 
-                                // 过滤掉杂讯行（对象、消费税、内訳等）
-                                $exclude = ['対象', '消費税', '内訳', '預り', 'お釣', '現', '再発行'];
-                                $isSkip = false;
-                                foreach ($exclude as $w) {
-                                    if (mb_strpos($pName, $w) !== false) { $isSkip = true; break; }
-                                }
-
-                                if (!$isSkip && $price > 0) {
-                                    // 清理名称中的特殊符号和后缀
-                                    $cleanName = preg_replace('/^[◎*＊]\s*/u', '', $pName);
-                                    $cleanName = preg_replace('/(軽|轻|.*)$/u', '', $cleanName);
-                                    
-                                    $displayItems[] = ['name' => trim($cleanName), 'price' => $price];
-
-                                    // 存入数据库
-                                    $stmt = $conn->prepare("INSERT INTO receipts (image_name, product_name, price) VALUES (?, ?, ?)");
-                                    $stmt->execute([$name, trim($cleanName), $price]);
-                                }
+                            if (!$isSkip && $price > 0) {
+                                $displayItems[] = ['name' => $pName, 'price' => $price];
+                                $totalAmount += $price;
+                                $stmt = $conn->prepare("INSERT INTO receipts (image_name, product_name, price) VALUES (?, ?, ?)");
+                                $stmt->execute([$name, $pName, $price]);
                             }
                         }
                     }
@@ -133,14 +114,13 @@ if (!empty($_FILES['images']['tmp_name'][0])) {
         }
     }
 
-    // 生成 CSV
     $csvFile = 'result.csv';
     $handle = fopen($csvFile, 'w');
     fprintf($handle, chr(0xEF).chr(0xBB).chr(0xBF)); 
     foreach ($displayItems as $item) {
         fputcsv($handle, [$item['name'], $item['price']]);
     }
-    if ($totalAmountRow) fputcsv($handle, [$totalAmountRow['name'], $totalAmountRow['price']]);
+    fputcsv($handle, ['合计金额', $totalAmount]);
     fclose($handle);
 }
 ?>
@@ -151,45 +131,55 @@ if (!empty($_FILES['images']['tmp_name'][0])) {
     <meta charset="UTF-8">
     <title>FamilyMart 收据识别系统</title>
     <style>
-        body { font-family: sans-serif; margin: 20px; background-color: #f4f7f6; }
-        .container { max-width: 600px; margin: auto; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
-        .item-row { display: flex; justify-content: space-between; border-bottom: 1px solid #eee; padding: 10px 0; }
-        .total-row { font-size: 1.4em; font-weight: bold; color: #d13438; border-top: 2px solid #333; margin-top: 15px; padding-top: 10px; text-align: right; }
-        .btn { display: inline-block; background: #0078d4; color: #fff; padding: 8px 15px; text-decoration: none; border-radius: 4px; margin-top: 20px; }
+        body { font-family: sans-serif; margin: 20px; line-height: 1.6; background-color: #f4f7f6; }
+        .container { max-width: 700px; margin: auto; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        h2 { color: #333; border-bottom: 2px solid #0078d4; padding-bottom: 10px; }
+        .result-box { background: #f9f9f9; padding: 20px; border: 1px solid #ddd; border-radius: 8px; margin-top: 20px; }
+        .item-row { display: flex; justify-content: space-between; border-bottom: 1px solid #eee; padding: 8px 0; }
+        .item-name { flex: 1; }
+        .item-price { font-weight: bold; width: 100px; text-align: right; }
+        .total-row { font-size: 1.3em; font-weight: bold; text-align: right; margin-top: 15px; color: #d13438; border-top: 2px solid #333; padding-top: 10px; }
+        .download-zone { margin-top: 20px; padding: 15px; background: #e7f3ff; border-radius: 5px; }
+        .btn { display: inline-block; background: #0078d4; color: #fff; padding: 8px 15px; text-decoration: none; border-radius: 4px; margin-right: 10px; }
+        .btn:hover { background: #005a9e; }
     </style>
 </head>
 <body>
 
 <div class="container">
-    <h2>🏪 FamilyMart 收据识别</h2>
+    <h2>🏪 FamilyMart 收据识别 (强化版)</h2>
+    <p>请上传收据照片进行 OCR 识别。支持多张上传。</p>
+    
     <form method="post" enctype="multipart/form-data">
         <input type="file" name="images[]" multiple required>
-        <button type="submit" style="cursor:pointer; padding: 5px 15px;">上传并识别</button>
+        <button type="submit" style="cursor:pointer; padding: 5px 15px;">开始上传并识别</button>
     </form>
 
 <?php if (!empty($displayItems)): ?>
-    <div style="margin-top:20px;">
+    <div class="result-box">
         <h3>识别结果</h3>
         <?php foreach ($displayItems as $item): ?>
             <div class="item-row">
-                <span><?php echo htmlspecialchars($item['name']); ?></span>
-                <span>¥<?php echo number_format($item['price']); ?></span>
+                <span class="item-name"><?php echo htmlspecialchars($item['name']); ?></span>
+                <span class="item-price">¥<?php echo number_format($item['price']); ?></span>
             </div>
         <?php endforeach; ?>
         
-        <?php if ($totalAmountRow): ?>
-            <div class="total-row">
-                合计金额: ¥<?php echo number_format($totalAmountRow['price']); ?>
-            </div>
-        <?php endif; ?>
+        <div class="total-row">
+            合计金额: ¥<?php echo number_format($totalAmount); ?>
+        </div>
 
-        <div style="margin-top:20px;">
-            <a href="result.csv" class="btn" download>下载 CSV</a>
-            <a href="ocr.log" class="btn" style="background:#666;" target="_blank">查看日志</a>
+        <div class="download-zone">
+            <strong>📂 下载与验证:</strong><br><br>
+            <a href="result.csv" class="btn" download>下载 CSV 文件</a>
+            <a href="ocr.log" class="btn" target="_blank">查看 ocr.log 日志</a>
         </div>
     </div>
+<?php elseif ($_SERVER['REQUEST_METHOD'] == 'POST'): ?>
+    <p style="color:red; margin-top:20px;">未能识别到商品，请确认收据清晰度或检查 ocr.log 日志。</p>
 <?php endif; ?>
 
 </div>
 </body>
 </html>
+
