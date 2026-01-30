@@ -1,126 +1,135 @@
 <?php
+// Azure 配置
 $endpoint = "https://24jn0321.cognitiveservices.azure.com/"; 
 $apiKey   = "BQGkM056pMBAB5KVI6wmcSLBf2JlF8X2UUiwxw5N17K9QmWljMG3JQQJ99CAACi0881XJ3w3AAAFACOGrT37";
 
-// --- ダウンロード処理 ---
+$results = [];
+
+// --- 功能：CSV 和 日志下载 ---
 if (isset($_GET['download'])) {
-    if ($_GET['download'] == 'log') {
-        header('Content-Type: text/plain; charset=utf-8');
-        header('Content-Disposition: attachment; filename=ocr_log.txt');
-        echo file_exists('ocr_log.txt') ? file_get_contents('ocr_log.txt') : "ログがありません。";
-        exit;
+    if ($_GET['download'] == 'log' && file_exists('ocr_log.txt')) {
+        header('Content-Type: text/plain');
+        header('Content-Disposition: attachment; filename=log.txt');
+        readfile('ocr_log.txt'); exit;
+    }
+    if ($_GET['download'] == 'csv' && file_exists('last_data.json')) {
+        $data = json_decode(file_get_contents('last_data.json'), true);
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename=receipt.csv');
+        echo "\xEF\xBB\xBF"; // 防止乱码
+        $f = fopen('php://output', 'w');
+        fputcsv($f, ['文件名', '商品名称', '单价']);
+        foreach($data as $r) {
+            foreach($r['items'] as $it) fputcsv($f, [$r['file'], $it['name'], $it['price']]);
+            fputcsv($f, [$r['file'], 'TOTAL', $r['total']]);
+        }
+        fclose($f); exit;
     }
 }
 
-$results = [];
-$all_extracted_text = "";
-
+// --- 核心识别逻辑 ---
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
+    $debug_log = "";
     foreach ($_FILES['receipts']['tmp_name'] as $key => $tmpName) {
         if (empty($tmpName)) continue;
         $fileName = $_FILES['receipts']['name'][$key];
 
+        // API 请求
         $apiUrl = rtrim($endpoint, '/') . "/computervision/imageanalysis:analyze?api-version=2023-10-01&features=read";
-        $imageData = file_get_contents($tmpName);
+        $imgData = file_get_contents($tmpName);
 
         $ch = curl_init($apiUrl);
         curl_setopt($ch, CURLOPT_POST, true);
         curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/octet-stream', 'Ocp-Apim-Subscription-Key: ' . $apiKey]);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, $imageData);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $imgData);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        $response = curl_exec($ch);
+        $resp = curl_exec($ch);
         curl_close($ch);
 
-        $data = json_decode($response, true);
-        $all_extracted_text .= "=== File: $fileName ===\n" . json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT) . "\n\n";
-        
-        $lines = $data['readResult']['blocks'][0]['lines'] ?? [];
-        $items = [];
-        $total = 0;
-        $scan_finished = false;
+        $debug_log .= "=== $fileName ===\n" . $resp . "\n\n";
+        $json = json_decode($resp, true);
+        $lines = $json['readResult']['blocks'][0]['lines'] ?? [];
+
+        $items = []; $total = 0; $is_finished = false;
 
         for ($i = 0; $i < count($lines); $i++) {
             $text = trim($lines[$i]['text']);
+            if ($is_finished) break; // 拿到合计就停，防止读到消费税或卡余额
 
-            // 1. 商品名と単価の抽出（赤枠部分のロジック）
-            // 「証」や「領収」などはスキップし、商品名らしき行を探す
-            if (!$scan_finished && 
-                !preg_match('/Family|新宿|電話|登録|2024|領収|証|レジ|貴No/u', $text) && 
-                mb_strlen($text) > 2) {
-                
-                // 次の行、または同じ行に単価（¥数字）があるか確認
-                $price_line = "";
-                if (preg_match('/[¥￥]\s?(\d+)/u', $text, $m)) {
-                    $price_line = $text;
-                } elseif (isset($lines[$i+1]) && preg_match('/[¥￥]\s?(\d+)/u', $lines[$i+1]['text'], $m)) {
-                    $price_line = $lines[$i+1]['text'];
-                    $i++; // 次の行を消費
+            // 1. 识别“合计”行
+            if (preg_match('/(合計|合\s*計|小計)/u', $text)) {
+                // 在当前行或下一行找金额
+                $search = $text . ($lines[$i+1]['text'] ?? '');
+                if (preg_match('/[¥￥]\s?([\d,]+)/u', $search, $m)) {
+                    $total = (int)str_replace(',', '', $m[1]);
+                    $is_finished = true; 
+                    continue;
                 }
+            }
 
-                if ($price_line) {
-                    preg_match('/[¥￥]\s?([\d,]+)/u', $price_line, $m);
-                    $val = (int)str_replace(',', '', $m[1]);
-                    
-                    // 「合計」の行に到達したか判定
-                    if (preg_match('/合\s*計|小\s*計/u', $text)) {
-                        $total = $val;
-                        $scan_finished = true; // 合計以降（消費税や残高）は見ない
-                    } else {
-                        // 純粋な商品として追加
-                        $items[] = [
-                            'name' => str_replace(['＊', '*', '軽'], '', $text),
-                            'price' => $val
-                        ];
+            // 2. 识别“商品 + 价格” (红框部分)
+            // 过滤掉店名、日期、电话等杂质
+            if (!preg_match('/Family|新宿|电话|2024|证|号|店|No/u', $text) && mb_strlen($text) > 2) {
+                // 如果这一行没有价格，看下一行是不是价格
+                if (!preg_match('/[¥￥]/u', $text)) {
+                    if (isset($lines[$i+1]) && preg_match('/[¥￥]\s?([\d,]+)/u', $lines[$i+1]['text'], $m)) {
+                        $price = (int)str_replace(',', '', $m[1]);
+                        $cleanName = str_replace(['＊','*','轻','◎'], '', $text);
+                        $items[] = ['name' => $cleanName, 'price' => $price];
+                        $i++; // 跳过价格行
                     }
                 }
             }
         }
         $results[] = ['file' => $fileName, 'items' => $items, 'total' => $total];
     }
-    file_put_contents("ocr_log.txt", $all_extracted_text);
+    file_put_contents('ocr_log.txt', $debug_log);
+    file_put_contents('last_data.json', json_encode($results));
 }
 ?>
 
 <!DOCTYPE html>
-<html lang="ja">
+<html>
 <head>
     <meta charset="UTF-8">
-    <title>レシート一括解析</title>
+    <title>小票识别系统</title>
     <style>
-        body { font-family: sans-serif; background: #f0f2f5; padding: 20px; }
-        .container { max-width: 600px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        .card { border: 1px solid #ddd; padding: 15px; margin-bottom: 20px; border-radius: 5px; border-left: 5px solid #00a95c; }
-        .item { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px dashed #eee; }
-        .total { text-align: right; font-size: 1.4em; font-weight: bold; color: #d32f2f; margin-top: 10px; }
-        .btn { background: #0078d4; color: white; padding: 10px; border: none; width: 100%; cursor: pointer; border-radius: 4px; }
-        .dl-link { display: inline-block; margin-top: 10px; color: #0078d4; text-decoration: none; font-weight: bold; }
+        body { font-family: sans-serif; background: #f4f7f6; padding: 20px; }
+        .box { max-width: 600px; margin: auto; background: #fff; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .receipt { border-left: 5px solid #00a95c; background: #f9f9f9; padding: 15px; margin-bottom: 20px; }
+        .row { display: flex; justify-content: space-between; border-bottom: 1px dashed #ccc; padding: 8px 0; }
+        .total { text-align: right; color: #d32f2f; font-size: 1.5em; font-weight: bold; padding-top: 10px; }
+        .btn { background: #0078d4; color: white; border: none; padding: 12px; width: 100%; border-radius: 5px; cursor: pointer; }
+        .dl-bar { display: flex; gap: 10px; margin-top: 20px; }
+        .dl-btn { flex: 1; text-align: center; padding: 10px; background: #666; color: white; text-decoration: none; border-radius: 5px; font-size: 14px; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h2>コンビニレシート一括解析</h2>
-        <form action="" method="post" enctype="multipart/form-data">
-            <input type="file" name="receipts[]" multiple accept="image/*"><br><br>
-            <button type="submit" class="btn">3枚まとめて解析実行</button>
+    <div class="box">
+        <h2>🧾 小票扫描器</h2>
+        <form method="post" enctype="multipart/form-data">
+            <p style="color:red; font-size:12px;">※ 如提示 413 错误，请尝试“截图”后上传截图，或分次上传。</p>
+            <input type="file" name="receipts[]" multiple><br><br>
+            <button type="submit" class="btn">开始识别所有图片</button>
         </form>
 
-        <?php if ($results): ?>
-            <hr>
-            <?php foreach ($results as $res): ?>
-                <div class="card">
-                    <small>📄 <?php echo htmlspecialchars($res['file']); ?></small>
-                    <?php foreach ($res['items'] as $item): ?>
-                        <div class="item">
-                            <span><?php echo htmlspecialchars($item['name']); ?></span>
-                            <span>¥<?php echo number_format($item['price']); ?></span>
-                        </div>
-                    <?php endforeach; ?>
-                    <div class="total">合計 ¥<?php echo number_format($res['total']); ?></div>
-                </div>
-            <?php endforeach; ?>
-            
-            <div style="text-align: center;">
-                <a href="?download=log" class="dl-link">📄 ログファイルをダウンロード</a>
+        <?php foreach ($results as $res): ?>
+            <div class="receipt">
+                <div style="font-size: 12px; color: #888; margin-bottom: 10px;">📄 <?=$res['file']?></div>
+                <?php foreach ($res['items'] as $it): ?>
+                    <div class="row">
+                        <span><?=$it['name']?></span>
+                        <span>¥<?=number_format($it['price'])?></span>
+                    </div>
+                <?php endforeach; ?>
+                <div class="total">合计 ¥<?=number_format($res['total'])?></div>
+            </div>
+        <?php endforeach; ?>
+
+        <?php if($results): ?>
+            <div class="dl-bar">
+                <a href="?download=csv" class="dl-btn" style="background:#28a745;">下载 CSV 结果</a>
+                <a href="?download=log" class="dl-btn">下载扫描日志 (txt)</a>
             </div>
         <?php endif; ?>
     </div>
