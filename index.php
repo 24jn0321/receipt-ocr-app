@@ -1,10 +1,10 @@
 <?php
-// エラー表示
+// エラー表示（デバッグ用）
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
 
 /* =====================
-   1. 設定（Azure & DB）
+   1. 配置（Azure & DB） - 已套用您的信息
    ===================== */
 $endpoint = "https://24jn0321.cognitiveservices.azure.com/"; 
 $key      = "BQGkM056pMBAB5KVI6wmcSLBf2JlF8X2UUiwxw5N17K9QmWljMG3JQQJ99CAACi0881XJ3w3AAAFACOGrT37"; 
@@ -17,15 +17,16 @@ $password   = "Abc842727925";
 $uploadDir = "uploads/";
 if (!is_dir($uploadDir)) mkdir($uploadDir, 0777, true);
 
+// 数据库连接
 try {
     $conn = new PDO("sqlsrv:server=$serverName;Database=$database", $username, $password);
     $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 } catch (Exception $e) {
-    die("データベース接続失敗: " . $e->getMessage());
+    die("数据库连接失败: " . $e->getMessage());
 }
 
 /* =====================
-   2. 関数
+   2. 功能函数
    ===================== */
 function analyzeImage($image, $endpoint, $key) {
     $url = rtrim($endpoint, '/') . "/vision/v3.2/read/analyze";
@@ -46,7 +47,7 @@ function analyzeImage($image, $endpoint, $key) {
 function getResult($url, $key) {
     $max_attempts = 15; 
     for ($i = 0; $i < $max_attempts; $i++) {
-        sleep(1);
+        sleep(2);
         $ch = curl_init(trim($url));
         curl_setopt_array($ch, [
             CURLOPT_HTTPHEADER => ["Ocp-Apim-Subscription-Key: $key"],
@@ -61,13 +62,13 @@ function getResult($url, $key) {
 }
 
 /* =====================
-   3. メイン処理
+   3. 核心逻辑
    ===================== */
 $displayItems = [];
-$receiptTotal = 0; // レシートに記載された合計金額
+$totalAmountRow = null;
 
 if (!empty($_FILES['images']['tmp_name'][0])) {
-    file_put_contents("ocr.log", ""); 
+    file_put_contents("ocr.log", ""); // ログ初期化
 
     foreach ($_FILES['images']['tmp_name'] as $i => $tmp) {
         $name = basename($_FILES['images']['name'][$i]);
@@ -76,42 +77,54 @@ if (!empty($_FILES['images']['tmp_name'][0])) {
         if (move_uploaded_file($tmp, $path)) {
             $opUrl = analyzeImage($path, $endpoint, $key);
             $ocr = getResult($opUrl, $key);
+            
             file_put_contents("ocr.log", "--- FILE: $name ---\n" . json_encode($ocr, JSON_UNESCAPED_UNICODE) . "\n\n", FILE_APPEND);
 
             if ($ocr && isset($ocr['analyzeResult']['readResults'])) {
                 foreach ($ocr['analyzeResult']['readResults'] as $page) {
+                    
+                    $isExtracting = false; // 区域抓取开关
+
                     foreach ($page['lines'] as $line) {
                         $text = $line['text'];
-                        
-                        // 合計行の判定
-                        if (preg_match('/合計.*[¥￥]?([0-9,]{2,7})/', $text, $mt)) {
-                            $receiptTotal = (int)str_replace(',', '', $mt[1]);
+
+                        // 1. 识别到分隔符（等号或虚线）开启抓取
+                        if (preg_match('/[=\-]{3,}/', $text)) {
+                            $isExtracting = true;
                             continue;
                         }
 
-                        // 商品行の判定 (商品名 + 金額)
-                        // 末尾の「軽」「税」「*」などを除外する正規表現
-                        if (preg_match('/^(.+?)\s*[¥￥]?([0-9,]{2,7})\s*(軽|税|＊|\*)?$/u', $text, $m)) {
-                            $pName = trim($m[1]);
-                            
-                            // 不要な記号の削除
-                            $pName = preg_replace('/^[◎*＊]\s*/u', '', $pName); // 先頭の記号
-                            $pName = preg_replace('/\s*軽$/u', '', $pName);     // 末尾の「軽」
-                            
-                            $price = (int)str_replace(',', '', $m[2]);
+                        if ($isExtracting) {
+                            // 2. 正则匹配：[名称] [金额]
+                            if (preg_match('/^(.+?)[ \t　]*[¥￥]?([0-9,]{1,7})/u', $text, $m)) {
+                                $pName = trim($m[1]);
+                                $price = (int)str_replace(',', '', $m[2]);
 
-                            // 除外ワード
-                            $exclude = ['合計', '小計', '対象', '預り', 'お釣', '現金', '消費税', '再発行', '登録番号', '電話', 'レジ', '残高'];
-                            $isSkip = false;
-                            foreach ($exclude as $w) {
-                                if (mb_strpos($pName, $w) !== false) { $isSkip = true; break; }
-                            }
+                                // 识别到“合计”
+                                if (mb_strpos($pName, '合') !== false && mb_strpos($pName, '計') !== false) {
+                                    $totalAmountRow = ['name' => '合计', 'price' => $price];
+                                    $isExtracting = false; // 抓完合计，关闭开关
+                                    continue;
+                                }
 
-                            if (!$isSkip && $price > 0) {
-                                $displayItems[] = ['name' => $pName, 'price' => $price];
-                                // DB保存
-                                $stmt = $conn->prepare("INSERT INTO receipts (image_name, product_name, price) VALUES (?, ?, ?)");
-                                $stmt->execute([$name, $pName, $price]);
+                                // 过滤掉杂讯行（对象、消费税、内訳等）
+                                $exclude = ['対象', '消費税', '内訳', '預り', 'お釣', '現', '再発行'];
+                                $isSkip = false;
+                                foreach ($exclude as $w) {
+                                    if (mb_strpos($pName, $w) !== false) { $isSkip = true; break; }
+                                }
+
+                                if (!$isSkip && $price > 0) {
+                                    // 清理名称中的特殊符号和后缀
+                                    $cleanName = preg_replace('/^[◎*＊]\s*/u', '', $pName);
+                                    $cleanName = preg_replace('/(軽|轻|.*)$/u', '', $cleanName);
+                                    
+                                    $displayItems[] = ['name' => trim($cleanName), 'price' => $price];
+
+                                    // 存入数据库
+                                    $stmt = $conn->prepare("INSERT INTO receipts (image_name, product_name, price) VALUES (?, ?, ?)");
+                                    $stmt->execute([$name, trim($cleanName), $price]);
+                                }
                             }
                         }
                     }
@@ -120,50 +133,43 @@ if (!empty($_FILES['images']['tmp_name'][0])) {
         }
     }
 
-    // CSV作成
+    // 生成 CSV
     $csvFile = 'result.csv';
     $handle = fopen($csvFile, 'w');
     fprintf($handle, chr(0xEF).chr(0xBB).chr(0xBF)); 
     foreach ($displayItems as $item) {
         fputcsv($handle, [$item['name'], $item['price']]);
     }
-    fputcsv($handle, ['合計', $receiptTotal]);
+    if ($totalAmountRow) fputcsv($handle, [$totalAmountRow['name'], $totalAmountRow['price']]);
     fclose($handle);
 }
 ?>
 
 <!DOCTYPE html>
-<html lang="ja">
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>FamilyMart レシート識別システム</title>
+    <title>FamilyMart 收据识别系统</title>
     <style>
-        body { font-family: "Helvetica Neue", Arial, sans-serif; background-color: #f0f2f5; margin: 0; padding: 40px; }
-        .container { max-width: 600px; margin: auto; background: #fff; padding: 30px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
-        h2 { color: #00a650; border-bottom: 3px solid #00a650; padding-bottom: 10px; margin-top: 0; }
-        .upload-section { background: #f8f9fa; border: 2px dashed #ccc; padding: 20px; text-align: center; border-radius: 8px; }
-        .result-box { margin-top: 30px; border-top: 1px solid #eee; }
-        .item-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #f1f1f1; }
-        .total-row { font-size: 1.4em; font-weight: bold; color: #e02020; margin-top: 20px; text-align: right; }
-        .btn { display: inline-block; background: #0078d4; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; margin-top: 20px; font-size: 14px; }
-        .btn-log { background: #666; }
+        body { font-family: sans-serif; margin: 20px; background-color: #f4f7f6; }
+        .container { max-width: 600px; margin: auto; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        .item-row { display: flex; justify-content: space-between; border-bottom: 1px solid #eee; padding: 10px 0; }
+        .total-row { font-size: 1.4em; font-weight: bold; color: #d13438; border-top: 2px solid #333; margin-top: 15px; padding-top: 10px; text-align: right; }
+        .btn { display: inline-block; background: #0078d4; color: #fff; padding: 8px 15px; text-decoration: none; border-radius: 4px; margin-top: 20px; }
     </style>
 </head>
 <body>
 
 <div class="container">
-    <h2>🏪 FamilyMart レシート解析</h2>
-    <div class="upload-section">
-        <form method="post" enctype="multipart/form-data">
-            <input type="file" name="images[]" multiple required>
-            <br><br>
-            <button type="submit" style="padding: 10px 20px; cursor: pointer;">アップロードして解析</button>
-        </form>
-    </div>
+    <h2>🏪 FamilyMart 收据识别</h2>
+    <form method="post" enctype="multipart/form-data">
+        <input type="file" name="images[]" multiple required>
+        <button type="submit" style="cursor:pointer; padding: 5px 15px;">上传并识别</button>
+    </form>
 
 <?php if (!empty($displayItems)): ?>
-    <div class="result-box">
-        <h3>抽出結果</h3>
+    <div style="margin-top:20px;">
+        <h3>识别结果</h3>
         <?php foreach ($displayItems as $item): ?>
             <div class="item-row">
                 <span><?php echo htmlspecialchars($item['name']); ?></span>
@@ -171,15 +177,19 @@ if (!empty($_FILES['images']['tmp_name'][0])) {
             </div>
         <?php endforeach; ?>
         
-        <div class="total-row">
-            合計　¥<?php echo number_format($receiptTotal); ?>
-        </div>
+        <?php if ($totalAmountRow): ?>
+            <div class="total-row">
+                合计金额: ¥<?php echo number_format($totalAmountRow['price']); ?>
+            </div>
+        <?php endif; ?>
 
-        <a href="result.csv" class="btn" download>CSVをダウンロード</a>
-        <a href="ocr.log" class="btn btn-log" target="_blank">ocr.logを確認</a>
+        <div style="margin-top:20px;">
+            <a href="result.csv" class="btn" download>下载 CSV</a>
+            <a href="ocr.log" class="btn" style="background:#666;" target="_blank">查看日志</a>
+        </div>
     </div>
 <?php endif; ?>
-</div>
 
+</div>
 </body>
 </html>
