@@ -1,6 +1,6 @@
 <?php
 // 1. 基本設定とAzure情報の入力
-$endpoint = "https://24jn0321.cognitiveservices.azure.com/"; // 末尾に / があってもなくてもOK
+$endpoint = "https://24jn0321.cognitiveservices.azure.com/"; 
 $apiKey   = "BQGkM056pMBAB5KVI6wmcSLBf2JlF8X2UUiwxw5N17K9QmWljMG3JQQJ99CAACi0881XJ3w3AAAFACOGrT37";
 
 // データベース接続情報 (Azure SQL Database)
@@ -15,9 +15,12 @@ $results = [];
 
 // データベース接続 (PDO)
 try {
-    $dsn = "sqlsrv:server=$dbHost;Database=$dbName";
-    $pdo = new PDO($dsn, $dbUser, $dbPass);
+    // 変数名を $serverName, $database に統一し、ポート1433を明示
+    $dsn = "sqlsrv:server=$serverName,1433;Database=$database;LoginTimeout=30";
+    $pdo = new PDO($dsn, $username, $password);
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    
+    // --- 以下、元のコードと同じ ---
     
     // テーブルがなければ作成 (初回のみ)
     $pdo->exec("IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='ReceiptItems' AND xtype='U')
