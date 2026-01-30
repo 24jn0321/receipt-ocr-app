@@ -1,9 +1,8 @@
 <?php
 /**
- * 🧾 小票解析系统 - 过滤税费与重复金额版
+ * 🧾 小票解析系统 - 最终修复版 (解决重复金额与税费干扰)
  */
 
-// 1. 設定情報
 $endpoint = "https://24jn0321.cognitiveservices.azure.com/"; 
 $apiKey   = "BQGkM056pMBAB5KVI6wmcSLBf2JlF8X2UUiwxw5N17K9QmWljMG3JQQJ99CAACi0881XJ3w3AAAFACOGrT37"; 
 
@@ -11,7 +10,7 @@ $results = [];
 $storageFile = 'ocr_data.json';
 $logFile = 'ocr.log';
 
-// --- A. ダウンロード処理 ---
+// --- A. 下载逻辑 ---
 if (isset($_GET['action'])) {
     $action = $_GET['action'];
     if ($action == 'csv' && file_exists($storageFile)) {
@@ -19,11 +18,11 @@ if (isset($_GET['action'])) {
         header('Content-Disposition: attachment; filename=receipt_export.csv');
         echo "\xEF\xBB\xBF"; 
         $output = fopen('php://output', 'w');
-        fputcsv($output, ['ファイル名', '項目名', '金額']);
+        fputcsv($output, ['文件', '项目', '金额']);
         $data = json_decode(file_get_contents($storageFile), true);
         foreach ($data as $res) {
             foreach ($res['items'] as $it) fputcsv($output, [$res['file'], $it['name'], $it['price']]);
-            fputcsv($output, [$res['file'], '合計', $res['total']]);
+            fputcsv($output, [$res['file'], '合计', $res['total']]);
         }
         fclose($output); exit;
     }
@@ -35,7 +34,7 @@ if (isset($_GET['action'])) {
     }
 }
 
-// --- B. OCR解析処理 ---
+// --- B. OCR解析逻辑 ---
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
     foreach ($_FILES['receipts']['tmp_name'] as $key => $tmpName) {
         if (empty($tmpName)) continue;
@@ -56,57 +55,62 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
         $data = json_decode($response, true);
         $lines = $data['readResult']['blocks'][0]['lines'] ?? [];
 
-        $timestamp = date('Y-m-d H:i:s');
-        $rawTextLog = "=== OCR START: $fileName ($timestamp) ===\n";
-
+        $rawTextLog = "=== OCR START: $fileName (" . date('H:i:s') . ") ===\n";
         $currentItems = [];
         $sumAmount = 0;
         $stopFlag = false;
 
         for ($i = 0; $i < count($lines); $i++) {
             $text = trim($lines[$i]['text']);
-            $noSpace = str_replace([' ', '　', '=', '-', '_', '＊', '*', '◎'], '', $text);
+            // 预处理：去掉干扰符号
+            $cleanText = str_replace(['＊', '*', '◎', '√', ' '], '', $text);
 
-            // 1. 核心过滤：如果遇到这些词，说明进入了税费结算区，停止抓取新商品
-            if (preg_match('/合計|合計|合計|消費税|内訳|対象|課税|支払|残高|マネー|番号/u', $noSpace)) {
+            // 1. 区域判断：一旦出现“合计”或“结算相关词汇”，彻底停止商品抓取
+            if (preg_match('/合計|合計|消費税|内消費税|対象|課税|支払|残高|マネー/u', $cleanText)) {
                 if (!empty($currentItems)) $stopFlag = true; 
                 continue; 
             }
             if ($stopFlag) continue;
 
-            // 2. 匹配金额行
+            // 2. 金额抓取
             if (preg_match('/[¥￥]([\d,]+)/u', $text, $matches)) {
                 $price = (int)str_replace(',', '', $matches[1]);
                 
-                // 提取本行文字作为名字（去掉金额部分）
-                $name = trim(preg_replace('/[\.．…]+|[¥￥].*$/u', '', $text));
+                // 获取当前行的名字部分（去掉价格符号后的文字）
+                $namePart = trim(preg_replace('/[\.．…]+|[¥￥].*$/u', '', $text));
 
-                // 3. 向上溯源：如果当前行名字为空、太短或是纯金额（如 ¥198），则去上一行找名字
-                if (mb_strlen($name) < 2 || preg_match('/^[¥￥\d,\s]+$/u', $name)) {
+                // 【核心改进】：判定该行是否为“无效重复行”
+                // 如果名字部分是空的，或者本身就是金额（如 ¥168），这通常是小票的重复展示行，直接跳过。
+                if ($namePart === "" || preg_match('/^[¥￥\d,\s]+$/u', $namePart)) {
+                    continue; 
+                }
+
+                // 3. 名字溯源：如果本行名字太短（比如只有个“轻”字），向上找真正的商品名
+                if (mb_strlen($namePart) < 2 || preg_match('/%|軽/u', $namePart)) {
                     for ($j = $i - 1; $j >= 0; $j--) {
-                        $prevText = trim($lines[$j]['text']);
-                        // 排除单字符和干扰标题词
-                        if (mb_strlen($prevText) >= 2 && !preg_match('/領|収|証|合|計|%|再発行/u', $prevText)) {
-                            $name = $prevText;
+                        $prev = trim($lines[$j]['text']);
+                        // 过滤掉只有1个字的行或标题词
+                        if (mb_strlen($prev) >= 2 && !preg_match('/領|収|証|合|計|%|電話|店/u', $prev)) {
+                            $namePart = $prev;
                             break;
                         }
                     }
                 }
 
-                // 清洗名字
-                $cleanName = str_replace(['＊', '*', '轻', '軽', '◎', '(', ')', '.', '．', '√', ' '], '', $name);
+                // 最终清洗名字
+                $finalName = str_replace(['(', ')', '（', '）', '.', '．', '軽', '轻'], '', $namePart);
                 
-                // 4. 最终关卡：排除已知的系统词汇
-                if (mb_strlen($cleanName) >= 2 && !preg_match('/Family|新宿|電話|登録|領収|対象|消費税|合計/u', $cleanName)) {
-                    $currentItems[] = ['name' => $cleanName, 'price' => $price];
+                // 排除列表：确保这些词永远不会作为商品名存入
+                if (mb_strlen($finalName) >= 2 && !preg_match('/Family|新宿|電話|登録|領収|対象|消費税|合計/u', $finalName)) {
+                    $currentItems[] = ['name' => $finalName, 'price' => $price];
                     $sumAmount += $price;
                 }
             }
         }
         
-        // 记录日志
-        foreach ($lines as $line) { $rawTextLog .= "RAW_LINE: " . $line['text'] . "\n"; }
-        foreach ($currentItems as $ci) { $rawTextLog .= "  -> EXTRACTED: {$ci['name']} | {$ci['price']}\n"; }
+        // 记录日志供验证
+        foreach ($lines as $ln) { $rawTextLog .= "RAW: " . $ln['text'] . "\n"; }
+        foreach ($currentItems as $it) { $rawTextLog .= "  -> OK: {$it['name']} | {$it['price']}\n"; }
         file_put_contents($logFile, $rawTextLog . "=== END ===\n\n", FILE_APPEND);
 
         $results[] = ['file' => $fileName, 'items' => $currentItems, 'total' => $sumAmount];
@@ -116,35 +120,35 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
 ?>
 
 <!DOCTYPE html>
-<html lang="ja">
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>小票解析系统 - 优化版</title>
+    <title>小票解析 (过滤干扰项最终版)</title>
     <style>
         body { font-family: sans-serif; background: #f0f2f5; padding: 20px; }
-        .container { max-width: 700px; margin: auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
-        .card { border: 1px solid #e0e0e0; background: #fafafa; padding: 15px; margin-top: 15px; border-radius: 8px; }
-        .row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #eee; }
+        .container { max-width: 650px; margin: auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+        .card { border: 1px solid #eee; background: #fdfdfd; padding: 15px; margin-top: 15px; border-radius: 8px; border-left: 5px solid #1a73e8; }
+        .row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px dashed #ddd; }
         .total { font-size: 20px; font-weight: bold; color: #d93025; text-align: right; margin-top: 10px; }
-        .btn { width: 100%; padding: 12px; background: #1a73e8; color: white; border: none; cursor: pointer; border-radius: 6px; font-weight: bold; }
-        .actions { display: flex; gap: 10px; margin-top: 30px; justify-content: center; }
-        .link-btn { text-decoration: none; padding: 10px 20px; border-radius: 4px; color: white; font-weight: bold; font-size: 14px; }
+        .btn { width: 100%; padding: 12px; background: #1a73e8; color: white; border: none; cursor: pointer; border-radius: 6px; font-size: 16px; }
+        .footer { display: flex; gap: 10px; margin-top: 25px; justify-content: center; }
+        .link { text-decoration: none; padding: 8px 15px; border-radius: 4px; color: white; font-size: 14px; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h2 style="text-align:center;">🧾 小票解析 (过滤干扰项)</h2>
+        <h2 style="text-align:center;">🧾 小票解析系统</h2>
         <form method="post" enctype="multipart/form-data">
             <input type="file" name="receipts[]" multiple required><br><br>
-            <button type="submit" class="btn">解析图片</button>
+            <button type="submit" class="btn">解析选中的图片</button>
         </form>
 
         <?php if ($results): ?>
             <?php foreach ($results as $res): ?>
                 <div class="card">
-                    <div style="font-size: 11px; color: #999;">📄 <?= htmlspecialchars($res['file']) ?></div>
+                    <div style="font-size: 11px; color: #999; margin-bottom: 8px;">文件: <?= htmlspecialchars($res['file']) ?></div>
                     <?php if (empty($res['items'])): ?>
-                        <p>未找到有效商品。</p>
+                        <p style="color:#999">未检测到有效商品。</p>
                     <?php else: ?>
                         <?php foreach ($res['items'] as $it): ?>
                             <div class="row">
@@ -158,9 +162,13 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
             <?php endforeach; ?>
         <?php endif; ?>
 
-        <div class="actions">
-            <a href="?action=csv" class="link-btn" style="background:#34a853;">📥 CSV下载</a>
-            <a href="?action=log" class="link-btn" style="background:#5f6368;">📜 ocr.log下载</a>
+        <div class="footer">
+            <?php if (file_exists($storageFile)): ?>
+                <a href="?action=csv" class="link" style="background:#34a853;">📥 下载 CSV 数据</a>
+            <?php endif; ?>
+            <?php if (file_exists($logFile)): ?>
+                <a href="?action=log" class="link" style="background:#5f6368;">📜 下载 ocr.log</a>
+            <?php endif; ?>
         </div>
     </div>
 </body>
