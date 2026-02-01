@@ -146,98 +146,104 @@ if ($results) {
             padding: 40px 20px;
             background-color: var(--bg);
             color: var(--text);
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro", sans-serif;
             -webkit-font-smoothing: antialiased;
         }
 
-        .container {
-            max-width: 400px;
-            margin: 0 auto;
-        }
+        .container { max-width: 400px; margin: 0 auto; }
 
-        /* 紧凑型头部 */
-        header {
-            margin-bottom: 24px;
-        }
-        header h1 {
-            font-size: 20px;
-            font-weight: 600;
-            margin: 0;
-            letter-spacing: -0.5px;
-        }
+        header h1 { font-size: 22px; font-weight: 700; margin: 0 0 24px 0; letter-spacing: -0.5px; }
 
-        /* 结果容器 */
         .glass-card {
             background: var(--card);
-            border-radius: 12px;
-            padding: 20px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.05);
+            border-radius: 16px;
+            padding: 24px;
+            box-shadow: 0 8px 30px rgba(0,0,0,0.08);
         }
 
-        /* 精致上传框 */
+        /* 优化后的上传框 */
+        .upload-wrapper {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin-bottom: 24px;
+        }
+
         .upload-trigger {
+            position: relative;
             width: 80px;
             height: 80px;
             background: var(--bg);
-            border: 1px dashed var(--border);
-            border-radius: 12px;
+            border: 1.5px dashed var(--border);
+            border-radius: 14px;
             display: flex;
             flex-direction: column;
             align-items: center;
             justify-content: center;
             cursor: pointer;
-            transition: 0.2s;
-            margin-bottom: 20px;
+            overflow: hidden; /* 关键：用于裁剪预览图 */
+            transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
         }
-        .upload-trigger:hover { border-color: var(--accent); background: rgba(0,122,255,0.05); }
-        .upload-trigger svg { width: 24px; height: 24px; fill: var(--text-sub); margin-bottom: 4px; }
+
+        .upload-trigger:hover { border-color: var(--accent); background: rgba(0,122,255,0.04); }
+
+        /* 预览图样式 */
+        #preview {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: none; /* 初始隐藏 */
+        }
+
+        .upload-trigger svg { width: 22px; height: 22px; fill: var(--text-sub); margin-bottom: 4px; transition: 0.2s; }
         .upload-trigger span { font-size: 11px; color: var(--text-sub); }
 
-        /* 按钮 */
+        /* 选中状态：框框变实线，图标变色 */
+        .upload-trigger.has-file { border: 2px solid var(--accent); background: #fff; }
+
+        .file-info { font-size: 13px; color: var(--accent); font-weight: 500; }
+
         .btn-action {
             width: 100%;
             background: var(--accent);
             color: white;
             border: none;
-            padding: 12px;
-            border-radius: 10px;
-            font-size: 15px;
-            font-weight: 500;
+            padding: 14px;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 600;
             cursor: pointer;
+            transition: 0.2s;
         }
-        .btn-action:disabled { opacity: 0.4; }
+        .btn-action:active { transform: scale(0.98); opacity: 0.9; }
+        .btn-action:disabled { background: var(--border); color: var(--text-sub); }
 
-        /* 明细列表 */
-        .list { margin-top: 24px; border-top: 1px solid var(--border); }
+        /* 结果列表 */
+        .list { margin-top: 28px; border-top: 1px solid var(--border); }
         .row {
             display: flex;
             justify-content: space-between;
-            padding: 12px 0;
+            padding: 16px 0;
             border-bottom: 0.5px solid var(--border);
-            font-size: 14px;
+            font-size: 15px;
         }
-        .name { color: var(--text); flex: 1; padding-right: 10px; }
-        .price { font-weight: 600; font-variant-numeric: tabular-nums; }
+        .name { color: var(--text); flex: 1; padding-right: 12px; }
+        .price { font-weight: 600; font-family: "SF Mono", monospace; }
 
-        /* 合计栏 */
+        /* 合计 */
         .total-bar {
-            margin-top: 24px;
+            margin-top: 28px;
             display: flex;
             justify-content: space-between;
             align-items: baseline;
         }
-        .total-label { font-size: 14px; font-weight: 500; color: var(--text-sub); }
-        .total-val { font-size: 28px; font-weight: 700; }
-        .total-val small { font-size: 16px; margin-right: 2px; }
+        .total-label { font-size: 16px; font-weight: 600; color: var(--text-sub); }
+        .total-val { font-size: 36px; font-weight: 800; letter-spacing: -1px; }
+        .total-val small { font-size: 18px; margin-right: 2px; font-weight: 600; }
 
-        footer {
-            margin-top: 32px;
-            text-align: center;
-            font-size: 12px;
-        }
-        footer a { color: var(--accent); text-decoration: none; margin: 0 8px; }
-
-        #status { font-size: 12px; color: var(--accent); margin-top: 10px; text-align: center; }
+        footer { margin-top: 40px; text-align: center; }
+        footer a { color: var(--text-sub); text-decoration: none; font-size: 13px; margin: 0 10px; }
     </style>
 </head>
 <body>
@@ -249,14 +255,17 @@ if ($results) {
 
     <div class="glass-card">
         <form id="uploadForm">
-            <label class="upload-trigger">
-                <input type="file" id="fileInput" name="receipts[]" multiple hidden>
-                <svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
-                <span>选照片</span>
-            </label>
+            <div class="upload-wrapper">
+                <label class="upload-trigger" id="dropLabel">
+                    <input type="file" id="fileInput" name="receipts[]" multiple hidden accept="image/*">
+                    <img id="preview" alt="Preview">
+                    <svg id="plusIcon" viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+                    <span id="uploadText">选照片</span>
+                </label>
+                <div class="file-info" id="fileStatus">等待上传</div>
+            </div>
             
             <button type="submit" class="btn-action" id="subBtn">开始解析</button>
-            <div id="status"></div>
         </form>
 
         <?php if ($results): ?>
@@ -286,18 +295,38 @@ if ($results) {
 
 <script>
     const input = document.getElementById('fileInput');
-    const status = document.getElementById('status');
+    const status = document.getElementById('fileStatus');
     const btn = document.getElementById('subBtn');
+    const preview = document.getElementById('preview');
+    const plusIcon = document.getElementById('plusIcon');
+    const uploadText = document.getElementById('uploadText');
+    const dropLabel = document.getElementById('dropLabel');
 
     input.onchange = () => {
-        status.innerText = `已选 ${input.files.length} 张图片`;
+        if (input.files && input.files[0]) {
+            const count = input.files.length;
+            status.innerText = `已选 ${count} 张照片`;
+            
+            // 状态高亮
+            dropLabel.classList.add('has-file');
+            
+            // 显示第一张图的预览
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                preview.src = e.target.result;
+                preview.style.display = 'block';
+                plusIcon.style.opacity = '0';
+                uploadText.style.opacity = '0';
+            }
+            reader.readAsDataURL(input.files[0]);
+        }
     };
 
     document.getElementById('uploadForm').onsubmit = async e => {
         e.preventDefault();
         if(!input.files.length) return;
         btn.disabled = true;
-        status.innerText = "识别中...";
+        btn.innerText = "正在识别...";
         
         const fd = new FormData();
         for (let f of input.files) fd.append('receipts[]', f, f.name);
