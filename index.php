@@ -1,7 +1,7 @@
 <?php
 /**
  * 🧾 小票解析系统 - Azure SQL データベース統合版
- * 修改说明：打开页面时不显示历史记录，仅在上传后显示本次解析结果。
+ * 修改说明：修复多张上传只显示一张的问题，保留日志下载功能。
  */
 
 // --- 1. 配置与環境設置 ---
@@ -27,25 +27,31 @@ if ($conn === false) {
     die("<pre>" . print_r(sqlsrv_errors(), true) . "</pre>");
 }
 
-// --- 3. 动作处理 (CSV/清空) ---
+// --- 3. 动作处理 (CSV/清空/日志下载) ---
 if (isset($_GET['action'])) {
     $action = $_GET['action'];
     
-    // CSV输出 (导出完整历史记录)
     if ($action == 'csv') {
         header('Content-Type: text/csv; charset=utf-8');
         header('Content-Disposition: attachment; filename=receipt_export_'.date('Ymd').'.csv');
         echo "\xEF\xBB\xBF"; 
         $output = fopen('php://output', 'w');
         fputcsv($output, ['文件名', '项目', '金额', '日期']);
-        
-        $sql = "SELECT r.file_name, r.processed_at, i.item_name, i.price 
-                FROM receipts r JOIN receipt_items i ON r.id = i.receipt_id";
+        $sql = "SELECT r.file_name, r.processed_at, i.item_name, i.price FROM receipts r JOIN receipt_items i ON r.id = i.receipt_id";
         $stmt = sqlsrv_query($conn, $sql);
         while ($row = sqlsrv_fetch_array($stmt, SQLSRV_FETCH_ASSOC)) {
             fputcsv($output, [$row['file_name'], $row['item_name'], $row['price'], $row['processed_at']->format('Y-m-d H:i:s')]);
         }
         fclose($output); exit;
+    }
+
+    if ($action == 'download_log') {
+        if (file_exists($logFile)) {
+            header('Content-Type: text/plain');
+            header('Content-Disposition: attachment; filename="ocr.log"');
+            readfile($logFile);
+            exit;
+        }
     }
 
     if ($action == 'clear') {
@@ -55,7 +61,7 @@ if (isset($_GET['action'])) {
 }
 
 // --- 4. OCR 核心解析逻辑 ---
-$receiptId = null; // 用于存储最后一张解析的小票ID
+$processedIds = []; // 修改：用数组存储本次所有生成的ID
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
     file_put_contents($logFile, "\n[" . date('Y-m-d H:i:s') . "] --- 开始識別任務 ---\n", FILE_APPEND);
     
@@ -92,71 +98,57 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
         for ($i = 0; $i < count($lines); $i++) {
             $text = trim($lines[$i]['text']);
             $pureText = str_replace([' ', '　', '＊', '*', '√', '軽', '轻', '(', ')', '8%', '10%'], '', $text);
-
             if (preg_match('/合計|合计|内消費税|消費税|対象|支払|残高|再発行/u', $pureText)) {
                 if (!empty($currentItems)) $stopFlag = true; 
                 continue; 
             }
             if ($stopFlag) continue;
-
             if (preg_match('/[¥￥]([\d,]+)/u', $text, $matches)) {
                 $price = (int)str_replace(',', '', $matches[1]);
                 $nameInLine = trim(preg_replace('/[\.．…]+|[¥￥].*$/u', '', $text));
                 $cleanNameInLine = str_replace(['＊', '*', '轻', '軽', '(', ')', '.', '．', ' '], '', $nameInLine);
-
                 if (mb_strlen($cleanNameInLine) < 2 || preg_match('/^[¥￥\d,\s]+$/u', $cleanNameInLine)) {
                     $foundName = "";
                     for ($j = $i - 1; $j >= 0; $j--) {
                         $prev = trim($lines[$j]['text']);
                         $cleanPrev = str_replace(['＊', '*', ' ', '√', '軽', '轻'], '', $prev);
                         if (mb_strlen($cleanPrev) >= 2 && !preg_match('/領|収|証|合|计|計|%|店|电话|電話|¥|￥/u', $cleanPrev)) {
-                            $foundName = $cleanPrev;
-                            break;
+                            $foundName = $cleanPrev; break;
                         }
                     }
                     $finalName = $foundName;
-                } else {
-                    $finalName = $cleanNameInLine;
-                }
-
+                } else { $finalName = $cleanNameInLine; }
                 if (!empty($finalName) && !preg_match('/Family|新宿|電話|登録|領収|対象|消費税|合計|内訳/u', $finalName)) {
-                    $isDuplicate = false;
-                    foreach ($currentItems as $existingItem) {
-                        if ($existingItem['name'] === $finalName && $existingItem['price'] === $price) {
-                            $isDuplicate = true; break;
-                        }
-                    }
-                    if (!$isDuplicate) {
-                        $currentItems[] = ['name' => $finalName, 'price' => $price];
-                    }
+                    $currentItems[] = ['name' => $finalName, 'price' => $price];
                 }
             }
         }
 
-        // --- データベースへの保存 ---
         if (!empty($currentItems)) {
             $sqlR = "INSERT INTO receipts (file_name) OUTPUT INSERTED.id VALUES (?)";
             $stmtR = sqlsrv_query($conn, $sqlR, array($fileName));
             if ($stmtR && sqlsrv_fetch($stmtR)) {
-                $receiptId = sqlsrv_get_field($stmtR, 0); // 记录下当前处理的ID
+                $newId = sqlsrv_get_field($stmtR, 0);
+                $processedIds[] = $newId; // 收集 ID
                 foreach ($currentItems as $it) {
                     $sqlI = "INSERT INTO receipt_items (receipt_id, item_name, price) VALUES (?, ?, ?)";
-                    sqlsrv_query($conn, $sqlI, array($receiptId, $it['name'], $it['price']));
+                    sqlsrv_query($conn, $sqlI, array($newId, $it['name'], $it['price']));
                 }
-                file_put_contents($logFile, "  [DB SUCCESS] $fileName\n", FILE_APPEND);
+                file_put_contents($logFile, "  [DB SUCCESS] $fileName (ID: $newId)\n", FILE_APPEND);
             }
         }
     }
 }
 
-// --- 5. 表示用データの読み取り (仅在 POST 后显示本次结果) ---
+// --- 5. 表示用データの読み取り ---
 $results = [];
 $totalAllAmount = 0;
 
-if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($receiptId)) {
-    // 仅查询最后一次插入的 ID 相关的数据，不查全表
-    $sqlMain = "SELECT id, file_name FROM receipts WHERE id = ?";
-    $resMain = sqlsrv_query($conn, $sqlMain, array($receiptId));
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && !empty($processedIds)) {
+    // 修改：使用 IN 语句查询本次上传的所有小票
+    $idList = implode(',', $processedIds);
+    $sqlMain = "SELECT id, file_name FROM receipts WHERE id IN ($idList)";
+    $resMain = sqlsrv_query($conn, $sqlMain);
     
     if ($resMain) {
         while ($row = sqlsrv_fetch_array($resMain, SQLSRV_FETCH_ASSOC)) {
@@ -194,7 +186,6 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($receiptId)) {
 <body>
     <div class="box">
         <h2 style="text-align:center;">📜 小票解析汇总 (SQL版)</h2>
-        
         <form id="uploadForm" method="post" enctype="multipart/form-data">
             <input type="file" id="fileInput" name="receipts[]" multiple required style="margin-bottom:20px; width: 100%;">
             <button type="submit" id="submitBtn" class="btn-main">开始解析并存入DB</button>
@@ -215,7 +206,6 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($receiptId)) {
                         <?php endforeach; ?>
                     </div>
                 <?php endforeach; ?>
-
                 <div class="grand-total">
                     <div>本次解析总金額</div>
                     <div class="amount-big">¥<?= number_format($totalAllAmount) ?></div>
@@ -224,7 +214,8 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($receiptId)) {
         <?php endif; ?>
 
         <div class="nav-bar">
-            <a href="?action=csv" class="nav-link">📥 导出历史记录 (CSV)</a>
+            <a href="?action=csv" class="nav-link">📥 导出 CSV</a>
+            <a href="?action=download_log" class="nav-link">📝 下载日志</a>
             <a href="?action=clear" class="nav-link" style="color:#ff4d4f;" onclick="return confirm('确定清空数据库中的所有历史记录吗？')">🗑️ 清空数据库</a>
         </div>
     </div>
@@ -236,17 +227,14 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($receiptId)) {
         const status = document.getElementById('status');
         const files = document.getElementById('fileInput').files;
         if (!files.length) return;
-
         btn.disabled = true;
         status.style.display = "block";
-
         const formData = new FormData();
         for (let i = 0; i < files.length; i++) {
             status.innerText = `正在处理 (${i+1}/${files.length})...`;
             const compressed = await compressImg(files[i]);
             formData.append('receipts[]', compressed, files[i].name);
         }
-
         fetch('', { method: 'POST', body: formData })
         .then(r => r.text())
         .then(html => {
@@ -254,7 +242,6 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($receiptId)) {
             document.body.innerHTML = doc.body.innerHTML;
         });
     };
-
     function compressImg(file) {
         return new Promise(resolve => {
             const reader = new FileReader();
