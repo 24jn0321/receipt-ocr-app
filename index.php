@@ -14,14 +14,13 @@ $apiKey   = "BQGkM056pMBAB5KVI6wmcSLBf2JlF8X2UUiwxw5N17K9QmWljMG3JQQJ99CAACi0881
 $logFile = 'ocr.log';
 
 // --- 2. Azure SQL 接続設定 (ここを書き換えてください) ---
-$serverName = "tcp:あなたのサーバー名.database.windows.net,1433"; 
+$serverName = "tcp:receipt-server-24jn0.database.windows.net,1433"; 
 $connectionOptions = array(
-    "Database" => "receipt-server-24jn0.database.windows.net",
+    "Database" => "receiptdb",
     "Uid" => "sqladmin",
     "PWD" => "Abc842727925",
     "CharacterSet" => "UTF-8"
 );
-
 $conn = sqlsrv_connect($serverName, $connectionOptions);
 if ($conn === false) {
     die("<pre>" . print_r(sqlsrv_errors(), true) . "</pre>");
