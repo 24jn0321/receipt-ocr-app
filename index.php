@@ -1,6 +1,6 @@
 <?php
 /**
- * 🧾 小票解析系统 - 多图并发处理优化版
+ * 🧾 小票解析系统 - 多图并发处理修复版
  */
 
 $endpoint = "https://24jn0321.cognitiveservices.azure.com/"; 
@@ -10,7 +10,7 @@ $results = [];
 $storageFile = 'ocr_data.json';
 $logFile = 'ocr.log';
 
-// --- A. 下载处理 ---
+// --- A. 下载处理 (CSV & LOG) ---
 if (isset($_GET['action'])) {
     $action = $_GET['action'];
     if ($action == 'csv' && file_exists($storageFile)) {
@@ -38,9 +38,10 @@ if (isset($_GET['action'])) {
 
 // --- B. OCR 解析逻辑 ---
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
+    // 每次上传清空旧日志
     file_put_contents($logFile, "--- OCR DEBUG LOG " . date('Y-m-d H:i:s') . " ---\n");
     
-    // 遍历上传的所有文件
+    // 关键：循环处理所有上传的文件
     foreach ($_FILES['receipts']['tmp_name'] as $key => $tmpName) {
         if (empty($tmpName)) continue;
         
@@ -54,11 +55,9 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
         curl_setopt($ch, CURLOPT_POSTFIELDS, $imgData);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-        $response = curl_exec($ch); 
-        curl_close($ch);
+        $response = curl_exec($ch); curl_close($ch);
 
         $data = json_decode($response, true);
-        // 关键点：Azure 的返回结构中 blocks[0] 可能不存在，增加兼容性判断
         $lines = $data['readResult']['blocks'][0]['lines'] ?? [];
 
         $currentItems = [];
@@ -67,8 +66,9 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
         
         file_put_contents($logFile, "\n[FILE]: $fileName\n", FILE_APPEND);
 
-        foreach ($lines as $line) {
-            $text = trim($line['text']);
+        // --- 核心识别逻辑循环 ---
+        for ($i = 0; $i < count($lines); $i++) {
+            $text = trim($lines[$i]['text']);
             file_put_contents($logFile, "  RAW: $text\n", FILE_APPEND);
 
             $pureText = str_replace([' ', '　', '＊', '*', '◎', '√', '軽', '轻', '(', ')'], '', $text);
@@ -79,31 +79,49 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
             }
             if ($stopFlag) continue;
 
+            // 匹配金额行
             if (preg_match('/[¥￥]([\d,]+)/u', $text, $matches)) {
                 $price = (int)str_replace(',', '', $matches[1]);
                 $nameInLine = trim(preg_replace('/[\.．…]+|[¥￥].*$/u', '', $text));
                 $cleanNameInLine = str_replace(['＊', '*', '轻', '軽', '◎', '(', ')', '.', '．', ' '], '', $nameInLine);
 
+                // --- 找回你的核心代码：如果本行没有名字，向上寻找 ---
                 if (empty($cleanNameInLine) || preg_match('/^[¥￥\d,\s]+$/u', $cleanNameInLine)) {
-                    $foundName = "未知商品";
-                    // 向上查找逻辑保持不变...
-                    // (此处省略原有向上查找代码以保持简洁，逻辑与原版一致)
+                    $foundName = "";
+                    for ($j = $i - 1; $j >= 0; $j--) {
+                        $prev = trim($lines[$j]['text']);
+                        $cleanPrev = str_replace(['＊', '*', '◎', ' ', '√', '軽', '轻'], '', $prev);
+                        if (mb_strlen($cleanPrev) >= 2 && !preg_match('/領|収|証|合|计|計|%|店|电话|電話|¥|￥/u', $cleanPrev)) {
+                            $foundName = $cleanPrev;
+                            break;
+                        }
+                    }
                     $finalName = $foundName;
                 } else {
                     $finalName = $cleanNameInLine;
                 }
 
                 if (!empty($finalName) && !preg_match('/Family|新宿|電話|登録|領収|対象|消費税|合計|内訳/u', $finalName)) {
-                    $currentItems[] = ['name' => $finalName, 'price' => $price];
-                    $sumAmount += $price;
-                    file_put_contents($logFile, "    -> ADDED: $finalName ($price)\n", FILE_APPEND);
+                    // 去重检查
+                    $isDuplicate = false;
+                    foreach ($currentItems as $item) {
+                        if ($item['name'] === $finalName && $item['price'] === $price) {
+                            $isDuplicate = true; break;
+                        }
+                    }
+
+                    if (!$isDuplicate) {
+                        $currentItems[] = ['name' => $finalName, 'price' => $price];
+                        $sumAmount += $price;
+                        file_put_contents($logFile, "    -> ADDED: $finalName ($price)\n", FILE_APPEND);
+                    }
                 }
             }
         }
-        // 将每张图的结果存入数组
+        // 将单张小票结果存入总结果集
         $results[] = ['file' => $fileName, 'items' => $currentItems, 'total' => $sumAmount];
     }
-    // 所有图片跑完后再统一存入文件
+    // 处理完所有图片后，统一保存
     file_put_contents($storageFile, json_encode($results, JSON_UNESCAPED_UNICODE));
 }
 ?>
@@ -116,7 +134,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
     <style>
         body { font-family: sans-serif; background: #f4f7f6; padding: 20px; }
         .box { max-width: 650px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
-        .card { border-left: 5px solid #2ecc71; background: #fafafa; padding: 15px; margin-top: 15px; border-radius: 4px; }
+        .card { border-left: 5px solid #2ecc71; background: #fafafa; padding: 15px; margin-top: 15px; border-radius: 4px; border-bottom: 1px solid #ddd; }
         .row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px dashed #eee; }
         .total { font-size: 20px; font-weight: bold; color: #e74c3c; text-align: right; margin-top: 10px; }
         .btn { width: 100%; padding: 12px; background: #3498db; color: white; border: none; cursor: pointer; border-radius: 6px; font-weight: bold; }
@@ -127,17 +145,16 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
 </head>
 <body>
     <div class="box">
-        <h2 style="text-align:center;">🧾 小票解析 (多图处理版)</h2>
+        <h2 style="text-align:center;">🧾 小票解析 (多图稳定版)</h2>
         <form method="post" enctype="multipart/form-data">
             <input type="file" name="receipts[]" multiple required style="margin-bottom:15px;"><br>
-            <p style="font-size: 12px; color: #666;">* 按住 Ctrl 或 Shift 可一次性选择多张小票上传</p>
             <button type="submit" class="btn">执行解析</button>
         </form>
 
-        <?php if (!empty($results)): ?>
+        <?php if ($results): ?>
             <?php foreach ($results as $res): ?>
                 <div class="card">
-                    <small style="color:#999">📄 <?= htmlspecialchars($res['file']) ?></small>
+                    <small style="color:#999">📄 文件: <?= htmlspecialchars($res['file']) ?></small>
                     <?php if (empty($res['items'])): ?>
                         <p style="color:#999; font-size:14px;">未检测到有效商品信息。</p>
                     <?php else: ?>
@@ -147,7 +164,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
                                 <span>¥<?= number_format($it['price']) ?></span>
                             </div>
                         <?php endforeach; ?>
-                        <div class="total">小计 ¥<?= number_format($res['total']) ?></div>
+                        <div class="total">合计 ¥<?= number_format($res['total']) ?></div>
                     <?php endif; ?>
                 </div>
             <?php endforeach; ?>
