@@ -96,7 +96,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
 
         for ($i = 0; $i < count($lines); $i++) {
             $text = trim($lines[$i]['text']);
-            $pureText = str_replace([' ', '　', '＊', '*', '√', '軽', '轻', '(', ')', '8%', '10%'], '', $text);
+            $pureText = str_replace([' ', '　', '＊', '*', '√', '軽', '轻', '(', ')', '8%', '10%', '◎'], '', $text);
 
             if (preg_match('/合計|合计|内消費税|消費税|対象|支払|残高|再発行/u', $pureText)) {
                 if (!empty($currentItems)) $stopFlag = true; 
@@ -107,7 +107,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
             if (preg_match('/[¥￥]([\d,]+)/u', $text, $matches)) {
                 $price = (int)str_replace(',', '', $matches[1]);
                 $nameInLine = trim(preg_replace('/[\.．…]+|[¥￥].*$/u', '', $text));
-                $cleanNameInLine = str_replace(['＊', '*', '轻', '軽', '(', ')', '.', '．', ' ', '◎'], '', $nameInLine);
+                $cleanNameInLine = str_replace(['＊', '*', '轻', '軽', '(', ')', '.', '．', ' '], '', $nameInLine);
 
                 if (mb_strlen($cleanNameInLine) < 2 || preg_match('/^[¥￥\d,\s]+$/u', $cleanNameInLine)) {
                     $foundName = "";
@@ -273,4 +273,3 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && !empty($processedIds)) {
     </script>
 </body>
 </html>
-
