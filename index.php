@@ -1,9 +1,6 @@
 <?php
 /**
- * 🧾 小票解析系统 - 最终汇总版
- * 修改点：
- * 1. 移除了单张小票的“小计”，改为页面底部的“全汇总合计”。
- * 2. 优化了结果展示逻辑。
+ * 🧾 小票解析系统 - 终极去重汇总版
  */
 
 @set_time_limit(300);
@@ -13,7 +10,7 @@ $endpoint = "https://24jn0321.cognitiveservices.azure.com/";
 $apiKey   = "BQGkM056pMBAB5KVI6wmcSLBf2JlF8X2UUiwxw5N17K9QmWljMG3JQQJ99CAACi0881XJ3w3AAAFACOGrT37"; 
 
 $results = [];
-$totalAllAmount = 0; // 新增：全局总计变量
+$totalAllAmount = 0; 
 $storageFile = 'ocr_data.json';
 $logFile = 'ocr.log';
 
@@ -27,15 +24,10 @@ if (isset($_GET['action'])) {
         $output = fopen('php://output', 'w');
         fputcsv($output, ['文件名', '项目', '金额']);
         $data = json_decode(file_get_contents($storageFile), true);
-        $grandTotal = 0;
         if ($data) {
             foreach ($data as $res) {
-                foreach ($res['items'] as $it) {
-                    fputcsv($output, [$res['file'], $it['name'], $it['price']]);
-                    $grandTotal += $it['price'];
-                }
+                foreach ($res['items'] as $it) fputcsv($output, [$res['file'], $it['name'], $it['price']]);
             }
-            fputcsv($output, ['---', '全汇总总计', $grandTotal]);
         }
         fclose($output); exit;
     }
@@ -89,6 +81,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
                 $nameInLine = trim(preg_replace('/[\.．…]+|[¥￥].*$/u', '', $text));
                 $cleanNameInLine = str_replace(['＊', '*', '轻', '軽', '◎', '(', ')', '.', '．', ' '], '', $nameInLine);
 
+                // 向上回溯找商品名
                 if (empty($cleanNameInLine) || preg_match('/^[¥￥\d,\s]+$/u', $cleanNameInLine)) {
                     $foundName = "";
                     for ($j = $i - 1; $j >= 0; $j--) {
@@ -104,8 +97,20 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
                     $finalName = $cleanNameInLine;
                 }
 
+                // --- 重点：加入严格去重逻辑 ---
                 if (!empty($finalName) && !preg_match('/Family|新宿|電話|登録|領収|対象|消費税|合計|内訳/u', $finalName)) {
-                    $currentItems[] = ['name' => $finalName, 'price' => $price];
+                    $isDuplicate = false;
+                    foreach ($currentItems as $item) {
+                        // 如果名字高度相似且金额一样，就判定为重复
+                        if ($item['name'] === $finalName && $item['price'] === $price) {
+                            $isDuplicate = true;
+                            break;
+                        }
+                    }
+                    if (!$isDuplicate) {
+                        $currentItems[] = ['name' => $finalName, 'price' => $price];
+                        file_put_contents($logFile, "    -> ADDED: $finalName ($price)\n", FILE_APPEND);
+                    }
                 }
             }
         }
@@ -113,16 +118,12 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
     }
     file_put_contents($storageFile, json_encode($results, JSON_UNESCAPED_UNICODE));
 } else if (file_exists($storageFile)) {
-    // 页面刷新时从文件读取旧数据以计算总计
     $results = json_decode(file_get_contents($storageFile), true);
 }
 
-// 计算总计
 if ($results) {
     foreach ($results as $res) {
-        foreach ($res['items'] as $it) {
-            $totalAllAmount += $it['price'];
-        }
+        foreach ($res['items'] as $it) { $totalAllAmount += $it['price']; }
     }
 }
 ?>
@@ -130,63 +131,51 @@ if ($results) {
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>小票解析终极版</title>
+    <title>小票解析系统</title>
     <style>
         body { font-family: sans-serif; background: #f4f7f6; padding: 20px; }
         .box { max-width: 650px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
         .card { border-left: 5px solid #2ecc71; background: #fafafa; padding: 10px 15px; margin-top: 10px; border-radius: 4px; }
         .row { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px dashed #eee; font-size: 14px; }
         .grand-total-box { margin-top: 25px; padding: 20px; background: #fff5f5; border: 2px solid #e74c3c; border-radius: 10px; text-align: right; }
-        .grand-total-label { font-size: 16px; color: #666; }
         .grand-total-amount { font-size: 28px; font-weight: bold; color: #e74c3c; }
         .btn { width: 100%; padding: 12px; background: #3498db; color: white; border: none; cursor: pointer; border-radius: 6px; font-weight: bold; }
-        .actions { margin-top: 30px; display: flex; justify-content: center; gap: 20px; }
-        .link-btn { text-decoration: none; font-size: 14px; font-weight: bold; color: #3498db; border: 1px solid #3498db; padding: 8px 15px; border-radius: 5px; }
     </style>
 </head>
 <body>
     <div class="box">
-        <h2 style="text-align:center;">🧾 小票解析 (全汇总增强版)</h2>
-        
+        <h2 style="text-align:center;">🧾 小票解析 (全汇总版)</h2>
         <form id="uploadForm" method="post" enctype="multipart/form-data">
             <input type="file" id="fileInput" name="receipts[]" multiple required style="margin-bottom:15px;"><br>
             <button type="submit" id="submitBtn" class="btn">执行解析</button>
-            <p id="status" style="display:none; color:#3498db; font-size:14px; margin-top:10px; text-align:center;">正在处理多张小票，请稍候...</p>
         </form>
 
         <script>
         document.getElementById('uploadForm').onsubmit = async function(e) {
             e.preventDefault();
             const btn = document.getElementById('submitBtn');
-            const status = document.getElementById('status');
-            const files = document.getElementById('fileInput').files;
-            if (files.length === 0) return;
-            btn.disabled = true;
-            status.style.display = "block";
+            btn.disabled = true; btn.innerText = "正在解析...";
             const formData = new FormData();
+            const files = document.getElementById('fileInput').files;
             for (let i = 0; i < files.length; i++) {
-                const reader = new FileReader();
-                const compressedFile = await new Promise(resolve => {
+                const compressed = await new Promise(resolve => {
+                    const reader = new FileReader();
                     reader.readAsDataURL(files[i]);
-                    reader.onload = (e) => {
-                        const img = new Image();
-                        img.src = e.target.result;
+                    reader.onload = (ev) => {
+                        const img = new Image(); img.src = ev.target.result;
                         img.onload = () => {
                             const canvas = document.createElement('canvas');
-                            let w = img.width, h = img.height;
-                            if (w > 1200) { h *= 1200 / w; w = 1200; }
-                            canvas.width = w; canvas.height = h;
-                            canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+                            let w = img.width; if (w > 1000) w = 1000;
+                            canvas.width = w; canvas.height = img.height * (w / img.width);
+                            canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
                             canvas.toBlob(b => resolve(new File([b], files[i].name, {type:'image/jpeg'})), 'image/jpeg', 0.8);
                         };
                     };
                 });
-                formData.append('receipts[]', compressedFile, files[i].name);
+                formData.append('receipts[]', compressed, files[i].name);
             }
-            fetch('', { method: 'POST', body: formData })
-            .then(r => r.text())
-            .then(html => {
-                document.open(); document.write(html); document.close();
+            fetch('', { method: 'POST', body: formData }).then(r => r.text()).then(h => {
+                document.open(); document.write(h); document.close();
             });
         };
         </script>
@@ -204,17 +193,16 @@ if ($results) {
                         <?php endforeach; ?>
                     </div>
                 <?php endforeach; ?>
-
                 <div class="grand-total-box">
-                    <span class="grand-total-label">全汇总总计</span><br>
-                    <span class="grand-total-amount">¥<?= number_format($totalAllAmount) ?></span>
+                    <div style="color:#666; font-size:14px;">全汇总总计</div>
+                    <div class="grand-total-amount">¥<?= number_format($totalAllAmount) ?></div>
                 </div>
             </div>
         <?php endif; ?>
 
-        <div class="actions">
-            <a href="?action=csv" class="link-btn">📥 下载汇总报表</a>
-            <a href="?action=log" class="link-btn" style="color:#7f8c8d; border-color:#7f8c8d;">📜 查看日志</a>
+        <div style="margin-top:20px; display:flex; gap:10px;">
+            <a href="?action=csv" style="flex:1; text-align:center; padding:10px; border:1px solid #3498db; color:#3498db; text-decoration:none; border-radius:5px;">下载 CSV</a>
+            <a href="?action=log" style="flex:1; text-align:center; padding:10px; border:1px solid #7f8c8d; color:#7f8c8d; text-decoration:none; border-radius:5px;">查看日志</a>
         </div>
     </div>
 </body>
