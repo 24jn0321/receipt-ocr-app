@@ -1,26 +1,20 @@
 <?php
 /**
- * 🧾 小票解析系统 - 终极集成汇总版
- * 结合功能：
- * 1. 前端图片压缩（解决 413 报错）
- * 2. 多图间隔请求（解决 API 频率限制）
- * 3. 核心算法：向上回溯找商品名 + 严格去重逻辑
- * 4. 汇总统计 + 完善的日志/CSV 导出
+ * 🧾 小票解析系统 - 保留 ◎ 符号版
  */
 
-// --- 1. 环境优化设置 ---
-@set_time_limit(300);          // 设置脚本最大执行时间为5分钟
-@ini_set('memory_limit', '256M'); // 提高内存限制处理大图
+@set_time_limit(300);
+@ini_set('memory_limit', '256M');
 
 $endpoint = "https://24jn0321.cognitiveservices.azure.com/"; 
 $apiKey   = "BQGkM056pMBAB5KVI6wmcSLBf2JlF8X2UUiwxw5N17K9QmWljMG3JQQJ99CAACi0881XJ3w3AAAFACOGrT37"; 
 
 $results = [];
-$totalAllAmount = 0; // 全局总计
+$totalAllAmount = 0; 
 $storageFile = 'ocr_data.json';
 $logFile = 'ocr.log';
 
-// --- A. 功能接口 (CSV/LOG 下载) ---
+// --- A. 功能接口 ---
 if (isset($_GET['action'])) {
     $action = $_GET['action'];
     if ($action == 'csv' && file_exists($storageFile)) {
@@ -55,8 +49,6 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
     
     foreach ($_FILES['receipts']['tmp_name'] as $key => $tmpName) {
         if (empty($tmpName)) continue;
-        
-        // --- 处理多张图时，每张间隔 1 秒，防止 API 拒绝请求 ---
         if ($key > 0) { sleep(1); } 
 
         $fileName = $_FILES['receipts']['name'][$key];
@@ -84,10 +76,9 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
             $text = trim($lines[$i]['text']);
             file_put_contents($logFile, "  RAW: $text\n", FILE_APPEND);
 
-            // 清理干扰字符
-            $pureText = str_replace([' ', '　', '＊', '*', '◎', '√', '軽', '轻', '(', ')', '8%', '10%'], '', $text);
+            // 1. 过滤逻辑：注意这里去掉了对 ◎ 的过滤
+            $pureText = str_replace([' ', '　', '＊', '*', '√', '軽', '轻', '(', ')', '8%', '10%'], '', $text);
 
-            // 1. 关键词拦截：进入统计区则停止
             if (preg_match('/合計|合计|内消費税|消費税|対象|支払|残高|再発行/u', $pureText)) {
                 if (!empty($currentItems)) $stopFlag = true; 
                 continue; 
@@ -98,16 +89,18 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
             if (preg_match('/[¥￥]([\d,]+)/u', $text, $matches)) {
                 $price = (int)str_replace(',', '', $matches[1]);
                 
-                // 提取本行文字并清洗
+                // 提取本行名字，【保留 ◎】
                 $nameInLine = trim(preg_replace('/[\.．…]+|[¥￥].*$/u', '', $text));
-                $cleanNameInLine = str_replace(['＊', '*', '轻', '軽', '◎', '(', ')', '.', '．', ' '], '', $nameInLine);
+                // 这里移除了过滤列表中的 ◎
+                $cleanNameInLine = str_replace(['＊', '*', '轻', '軽', '(', ')', '.', '．', ' '], '', $nameInLine);
 
-                // 核心回溯算法：如果本行名字太短或为空，向上找名字
+                // 如果本行没抓到有效名字，向上回溯
                 if (mb_strlen($cleanNameInLine) < 2 || preg_match('/^[¥￥\d,\s]+$/u', $cleanNameInLine)) {
                     $foundName = "";
                     for ($j = $i - 1; $j >= 0; $j--) {
                         $prev = trim($lines[$j]['text']);
-                        $cleanPrev = str_replace(['＊', '*', '◎', ' ', '√', '軽', '轻'], '', $prev);
+                        // 这里也移除了对 ◎ 的过滤
+                        $cleanPrev = str_replace(['＊', '*', ' ', '√', '軽', '轻'], '', $prev);
                         if (mb_strlen($cleanPrev) >= 2 && !preg_match('/領|収|証|合|计|計|%|店|电话|電話|¥|￥/u', $cleanPrev)) {
                             $foundName = $cleanPrev;
                             break;
@@ -118,7 +111,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
                     $finalName = $cleanNameInLine;
                 }
 
-                // 3. 最终校验与去重
+                // 3. 最终记录
                 if (!empty($finalName) && !preg_match('/Family|新宿|電話|登録|領収|対象|消費税|合計|内訳/u', $finalName)) {
                     $isDuplicate = false;
                     foreach ($currentItems as $item) {
@@ -140,12 +133,9 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
     $results = json_decode(file_get_contents($storageFile), true);
 }
 
-// 计算全汇总合计
 if ($results) {
     foreach ($results as $res) {
-        foreach ($res['items'] as $it) {
-            $totalAllAmount += $it['price'];
-        }
+        foreach ($res['items'] as $it) { $totalAllAmount += $it['price']; }
     }
 }
 ?>
@@ -169,13 +159,12 @@ if ($results) {
 </head>
 <body>
     <div class="box">
-        <h2 style="text-align:center;">🧾 小票解析 (全汇总增强版)</h2>
+        <h2 style="text-align:center;">🧾 小票解析 (保留◎增强版)</h2>
         
         <form id="uploadForm" method="post" enctype="multipart/form-data">
-            <p style="font-size:12px; color:#666;">支持同时选中多张小票上传</p>
             <input type="file" id="fileInput" name="receipts[]" multiple required style="margin-bottom:15px;"><br>
             <button type="submit" id="submitBtn" class="btn">执行解析</button>
-            <p id="status" style="display:none; color:#3498db; font-size:14px; margin-top:10px; text-align:center;">📸 正在压缩图片并解析，请耐心稍候...</p>
+            <p id="status" style="display:none; color:#3498db; font-size:14px; margin-top:10px; text-align:center;">📸 正在处理图片，请稍候...</p>
         </form>
 
         <script>
@@ -191,7 +180,7 @@ if ($results) {
 
             const formData = new FormData();
             for (let i = 0; i < files.length; i++) {
-                btn.innerText = `正在处理第 ${i+1}/${files.length} 张...`;
+                btn.innerText = `处理中 ${i+1}/${files.length}`;
                 const compressedFile = await compressImage(files[i]);
                 formData.append('receipts[]', compressedFile, files[i].name);
             }
@@ -203,12 +192,9 @@ if ($results) {
                 document.body.innerHTML = doc.body.innerHTML;
             })
             .catch(err => {
-                alert("解析失败，可能是网络问题。");
+                alert("解析失败");
                 btn.disabled = false;
                 btn.innerText = "执行解析";
-            })
-            .finally(() => {
-                status.style.display = "none";
             });
         };
 
@@ -221,10 +207,8 @@ if ($results) {
                     img.src = e.target.result;
                     img.onload = () => {
                         const canvas = document.createElement('canvas');
-                        let w = img.width;
-                        if (w > 1200) w = 1200;
-                        canvas.width = w;
-                        canvas.height = img.height * (w / img.width);
+                        let w = img.width; if (w > 1200) w = 1200;
+                        canvas.width = w; canvas.height = img.height * (w / img.width);
                         canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
                         canvas.toBlob(b => resolve(new File([b], file.name, {type:'image/jpeg'})), 'image/jpeg', 0.8);
                     };
@@ -238,19 +222,14 @@ if ($results) {
                 <?php foreach ($results as $res): ?>
                     <div class="card">
                         <small style="color:#999; font-size:11px;">📄 <?= htmlspecialchars($res['file']) ?></small>
-                        <?php if (empty($res['items'])): ?>
-                            <p style="color:#999; font-size:14px;">未检测到有效商品。</p>
-                        <?php else: ?>
-                            <?php foreach ($res['items'] as $it): ?>
-                                <div class="row">
-                                    <span><?= htmlspecialchars($it['name']) ?></span>
-                                    <span>¥<?= number_format($it['price']) ?></span>
-                                </div>
-                            <?php endforeach; ?>
-                        <?php endif; ?>
+                        <?php foreach ($res['items'] as $it): ?>
+                            <div class="row">
+                                <span><?= htmlspecialchars($it['name']) ?></span>
+                                <span>¥<?= number_format($it['price']) ?></span>
+                            </div>
+                        <?php endforeach; ?>
                     </div>
                 <?php endforeach; ?>
-
                 <div class="grand-total-box">
                     <div style="color:#666; font-size:14px;">全汇总总计</div>
                     <div class="grand-total-amount">¥<?= number_format($totalAllAmount) ?></div>
@@ -259,8 +238,8 @@ if ($results) {
         <?php endif; ?>
 
         <div class="actions">
-            <a href="?action=csv" class="link-btn">📥 下载汇总报表 (CSV)</a>
-            <a href="?action=log" class="link-btn" style="color:#7f8c8d; border-color:#7f8c8d;">📜 查看验证日志 (LOG)</a>
+            <a href="?action=csv" class="link-btn">📥 下载 CSV</a>
+            <a href="?action=log" class="link-btn" style="color:#7f8c8d; border-color:#7f8c8d;">📜 查看日志</a>
         </div>
     </div>
 </body>
