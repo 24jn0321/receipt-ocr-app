@@ -1,20 +1,26 @@
 <?php
 /**
- * 🧾 小票解析系统 - 最终修复版 (解决商品漏查问题)
+ * 🧾 小票解析系统 - 终极集成汇总版
+ * 结合功能：
+ * 1. 前端图片压缩（解决 413 报错）
+ * 2. 多图间隔请求（解决 API 频率限制）
+ * 3. 核心算法：向上回溯找商品名 + 严格去重逻辑
+ * 4. 汇总统计 + 完善的日志/CSV 导出
  */
 
-@set_time_limit(300);
-@ini_set('memory_limit', '256M');
+// --- 1. 环境优化设置 ---
+@set_time_limit(300);          // 设置脚本最大执行时间为5分钟
+@ini_set('memory_limit', '256M'); // 提高内存限制处理大图
 
 $endpoint = "https://24jn0321.cognitiveservices.azure.com/"; 
 $apiKey   = "BQGkM056pMBAB5KVI6wmcSLBf2JlF8X2UUiwxw5N17K9QmWljMG3JQQJ99CAACi0881XJ3w3AAAFACOGrT37"; 
 
 $results = [];
-$totalAllAmount = 0; 
+$totalAllAmount = 0; // 全局总计
 $storageFile = 'ocr_data.json';
 $logFile = 'ocr.log';
 
-// --- A. 功能接口 ---
+// --- A. 功能接口 (CSV/LOG 下载) ---
 if (isset($_GET['action'])) {
     $action = $_GET['action'];
     if ($action == 'csv' && file_exists($storageFile)) {
@@ -25,9 +31,14 @@ if (isset($_GET['action'])) {
         fputcsv($output, ['文件名', '项目', '金额']);
         $data = json_decode(file_get_contents($storageFile), true);
         if ($data) {
+            $grandTotal = 0;
             foreach ($data as $res) {
-                foreach ($res['items'] as $it) fputcsv($output, [$res['file'], $it['name'], $it['price']]);
+                foreach ($res['items'] as $it) {
+                    fputcsv($output, [$res['file'], $it['name'], $it['price']]);
+                    $grandTotal += $it['price'];
+                }
             }
+            fputcsv($output, ['---', '全汇总总计', $grandTotal]);
         }
         fclose($output); exit;
     }
@@ -38,12 +49,14 @@ if (isset($_GET['action'])) {
     }
 }
 
-// --- B. OCR 核心逻辑 ---
+// --- B. OCR 核心解析逻辑 ---
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
     file_put_contents($logFile, "--- OCR DEBUG LOG " . date('Y-m-d H:i:s') . " ---\n");
     
     foreach ($_FILES['receipts']['tmp_name'] as $key => $tmpName) {
         if (empty($tmpName)) continue;
+        
+        // --- 处理多张图时，每张间隔 1 秒，防止 API 拒绝请求 ---
         if ($key > 0) { sleep(1); } 
 
         $fileName = $_FILES['receipts']['name'][$key];
@@ -56,7 +69,8 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
         curl_setopt($ch, CURLOPT_POSTFIELDS, $imgData);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-        $response = curl_exec($ch); curl_close($ch);
+        $response = curl_exec($ch); 
+        curl_close($ch);
 
         $data = json_decode($response, true);
         $lines = $data['readResult']['blocks'][0]['lines'] ?? [];
@@ -68,46 +82,53 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
 
         for ($i = 0; $i < count($lines); $i++) {
             $text = trim($lines[$i]['text']);
-            // 1. 彻底清除干扰符，包括日本小票常见的 ◎ 和 軽
+            file_put_contents($logFile, "  RAW: $text\n", FILE_APPEND);
+
+            // 清理干扰字符
             $pureText = str_replace([' ', '　', '＊', '*', '◎', '√', '軽', '轻', '(', ')', '8%', '10%'], '', $text);
 
-            // 2. 只有遇到真正的结算关键词才停止
-            if (preg_match('/合計|合计|支払|残高|再発行/u', $pureText)) {
+            // 1. 关键词拦截：进入统计区则停止
+            if (preg_match('/合計|合计|内消費税|消費税|対象|支払|残高|再発行/u', $pureText)) {
                 if (!empty($currentItems)) $stopFlag = true; 
                 continue; 
             }
             if ($stopFlag) continue;
 
-            // 3. 匹配金额 (兼容 ¥108轻 这种格式)
+            // 2. 匹配金额行
             if (preg_match('/[¥￥]([\d,]+)/u', $text, $matches)) {
                 $price = (int)str_replace(',', '', $matches[1]);
                 
-                // 提取名字部分：去掉金额及之后的所有字符，去掉两端杂质
-                $nameInLine = preg_replace('/[¥￥\s].*$/u', '', $text);
-                $cleanName = str_replace(['＊', '*', '◎', ' ', '√', '軽', '轻', '(', ')'], '', $nameInLine);
+                // 提取本行文字并清洗
+                $nameInLine = trim(preg_replace('/[\.．…]+|[¥￥].*$/u', '', $text));
+                $cleanNameInLine = str_replace(['＊', '*', '轻', '軽', '◎', '(', ')', '.', '．', ' '], '', $nameInLine);
 
-                // 如果这一行没名字，向上找
-                if (mb_strlen($cleanName) < 2) {
+                // 核心回溯算法：如果本行名字太短或为空，向上找名字
+                if (mb_strlen($cleanNameInLine) < 2 || preg_match('/^[¥￥\d,\s]+$/u', $cleanNameInLine)) {
+                    $foundName = "";
                     for ($j = $i - 1; $j >= 0; $j--) {
-                        $prev = str_replace(['＊', '*', '◎', ' ', '√', '軽', '轻'], '', trim($lines[$j]['text']));
-                        if (mb_strlen($prev) >= 2 && !preg_match('/Family|新宿|店|電話|番号|領収|証|¥|￥|合計/u', $prev)) {
-                            $cleanName = $prev;
+                        $prev = trim($lines[$j]['text']);
+                        $cleanPrev = str_replace(['＊', '*', '◎', ' ', '√', '軽', '轻'], '', $prev);
+                        if (mb_strlen($cleanPrev) >= 2 && !preg_match('/領|収|証|合|计|計|%|店|电话|電話|¥|￥/u', $cleanPrev)) {
+                            $foundName = $cleanPrev;
                             break;
                         }
                     }
+                    $finalName = $foundName;
+                } else {
+                    $finalName = $cleanNameInLine;
                 }
 
-                // 最终验证：只要名字不是黑名单里的词，就记录
-                if (mb_strlen($cleanName) >= 2 && !preg_match('/消費税|対象|内訳|登録/u', $cleanName)) {
+                // 3. 最终校验与去重
+                if (!empty($finalName) && !preg_match('/Family|新宿|電話|登録|領収|対象|消費税|合計|内訳/u', $finalName)) {
                     $isDuplicate = false;
                     foreach ($currentItems as $item) {
-                        if ($item['name'] === $cleanName && $item['price'] === $price) {
+                        if ($item['name'] === $finalName && $item['price'] === $price) {
                             $isDuplicate = true; break;
                         }
                     }
                     if (!$isDuplicate) {
-                        $currentItems[] = ['name' => $cleanName, 'price' => $price];
-                        file_put_contents($logFile, "    -> ADDED: $cleanName ($price)\n", FILE_APPEND);
+                        $currentItems[] = ['name' => $finalName, 'price' => $price];
+                        file_put_contents($logFile, "    -> ADDED: $finalName ($price)\n", FILE_APPEND);
                     }
                 }
             }
@@ -119,9 +140,12 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
     $results = json_decode(file_get_contents($storageFile), true);
 }
 
+// 计算全汇总合计
 if ($results) {
     foreach ($results as $res) {
-        foreach ($res['items'] as $it) { $totalAllAmount += $it['price']; }
+        foreach ($res['items'] as $it) {
+            $totalAllAmount += $it['price'];
+        }
     }
 }
 ?>
@@ -129,53 +153,84 @@ if ($results) {
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>小票解析汇总版</title>
+    <title>小票解析汇总系统</title>
     <style>
-        body { font-family: sans-serif; background: #f4f7f6; padding: 20px; }
-        .box { max-width: 600px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
-        .card { border-left: 5px solid #2ecc71; background: #fafafa; padding: 10px 15px; margin-top: 10px; border-radius: 4px; }
-        .row { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px dashed #eee; font-size: 14px; }
+        body { font-family: 'PingFang SC', sans-serif; background: #f4f7f6; padding: 20px; }
+        .box { max-width: 650px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+        .card { border-left: 5px solid #2ecc71; background: #fafafa; padding: 15px; margin-top: 15px; border-radius: 4px; border-bottom: 1px solid #ddd; }
+        .row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px dashed #eee; font-size: 14px; }
         .grand-total-box { margin-top: 25px; padding: 20px; background: #fff5f5; border: 2px solid #e74c3c; border-radius: 10px; text-align: right; }
         .grand-total-amount { font-size: 28px; font-weight: bold; color: #e74c3c; }
         .btn { width: 100%; padding: 12px; background: #3498db; color: white; border: none; cursor: pointer; border-radius: 6px; font-weight: bold; }
+        .btn:disabled { background: #95a5a6; }
+        .actions { margin-top: 30px; display: flex; justify-content: center; gap: 20px; border-top: 1px solid #eee; padding-top: 20px; }
+        .link-btn { text-decoration: none; font-size: 14px; font-weight: bold; color: #3498db; border: 1px solid #3498db; padding: 8px 15px; border-radius: 5px; }
     </style>
 </head>
 <body>
     <div class="box">
-        <h2 style="text-align:center;">🧾 小票解析 (全汇总版)</h2>
+        <h2 style="text-align:center;">🧾 小票解析 (全汇总增强版)</h2>
+        
         <form id="uploadForm" method="post" enctype="multipart/form-data">
+            <p style="font-size:12px; color:#666;">支持同时选中多张小票上传</p>
             <input type="file" id="fileInput" name="receipts[]" multiple required style="margin-bottom:15px;"><br>
             <button type="submit" id="submitBtn" class="btn">执行解析</button>
+            <p id="status" style="display:none; color:#3498db; font-size:14px; margin-top:10px; text-align:center;">📸 正在压缩图片并解析，请耐心稍候...</p>
         </form>
 
         <script>
         document.getElementById('uploadForm').onsubmit = async function(e) {
             e.preventDefault();
             const btn = document.getElementById('submitBtn');
-            btn.disabled = true; btn.innerText = "解析中...";
-            const formData = new FormData();
+            const status = document.getElementById('status');
             const files = document.getElementById('fileInput').files;
+            if (files.length === 0) return;
+
+            btn.disabled = true;
+            status.style.display = "block";
+
+            const formData = new FormData();
             for (let i = 0; i < files.length; i++) {
-                const compressed = await new Promise(resolve => {
-                    const reader = new FileReader();
-                    reader.readAsDataURL(files[i]);
-                    reader.onload = (ev) => {
-                        const img = new Image(); img.src = ev.target.result;
-                        img.onload = () => {
-                            const canvas = document.createElement('canvas');
-                            let w = img.width; if (w > 1000) w = 1000;
-                            canvas.width = w; canvas.height = img.height * (w / img.width);
-                            canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
-                            canvas.toBlob(b => resolve(new File([b], files[i].name, {type:'image/jpeg'})), 'image/jpeg', 0.8);
-                        };
-                    };
-                });
-                formData.append('receipts[]', compressed, files[i].name);
+                btn.innerText = `正在处理第 ${i+1}/${files.length} 张...`;
+                const compressedFile = await compressImage(files[i]);
+                formData.append('receipts[]', compressedFile, files[i].name);
             }
-            fetch('', { method: 'POST', body: formData }).then(r => r.text()).then(h => {
-                document.open(); document.write(h); document.close();
+
+            fetch('', { method: 'POST', body: formData })
+            .then(r => r.text())
+            .then(html => {
+                const doc = new DOMParser().parseFromString(html, 'text/html');
+                document.body.innerHTML = doc.body.innerHTML;
+            })
+            .catch(err => {
+                alert("解析失败，可能是网络问题。");
+                btn.disabled = false;
+                btn.innerText = "执行解析";
+            })
+            .finally(() => {
+                status.style.display = "none";
             });
         };
+
+        function compressImage(file) {
+            return new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.readAsDataURL(file);
+                reader.onload = (e) => {
+                    const img = new Image();
+                    img.src = e.target.result;
+                    img.onload = () => {
+                        const canvas = document.createElement('canvas');
+                        let w = img.width;
+                        if (w > 1200) w = 1200;
+                        canvas.width = w;
+                        canvas.height = img.height * (w / img.width);
+                        canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+                        canvas.toBlob(b => resolve(new File([b], file.name, {type:'image/jpeg'})), 'image/jpeg', 0.8);
+                    };
+                };
+            });
+        }
         </script>
 
         <?php if ($results): ?>
@@ -183,14 +238,19 @@ if ($results) {
                 <?php foreach ($results as $res): ?>
                     <div class="card">
                         <small style="color:#999; font-size:11px;">📄 <?= htmlspecialchars($res['file']) ?></small>
-                        <?php foreach ($res['items'] as $it): ?>
-                            <div class="row">
-                                <span><?= htmlspecialchars($it['name']) ?></span>
-                                <span>¥<?= number_format($it['price']) ?></span>
-                            </div>
-                        <?php endforeach; ?>
+                        <?php if (empty($res['items'])): ?>
+                            <p style="color:#999; font-size:14px;">未检测到有效商品。</p>
+                        <?php else: ?>
+                            <?php foreach ($res['items'] as $it): ?>
+                                <div class="row">
+                                    <span><?= htmlspecialchars($it['name']) ?></span>
+                                    <span>¥<?= number_format($it['price']) ?></span>
+                                </div>
+                            <?php endforeach; ?>
+                        <?php endif; ?>
                     </div>
                 <?php endforeach; ?>
+
                 <div class="grand-total-box">
                     <div style="color:#666; font-size:14px;">全汇总总计</div>
                     <div class="grand-total-amount">¥<?= number_format($totalAllAmount) ?></div>
@@ -198,9 +258,9 @@ if ($results) {
             </div>
         <?php endif; ?>
 
-        <div style="margin-top:20px; display:flex; gap:10px;">
-            <a href="?action=csv" style="flex:1; text-align:center; padding:10px; border:1px solid #3498db; color:#3498db; text-decoration:none; border-radius:5px;">下载 CSV</a>
-            <a href="?action=log" style="flex:1; text-align:center; padding:10px; border:1px solid #7f8c8d; color:#7f8c8d; text-decoration:none; border-radius:5px;">查看日志</a>
+        <div class="actions">
+            <a href="?action=csv" class="link-btn">📥 下载汇总报表 (CSV)</a>
+            <a href="?action=log" class="link-btn" style="color:#7f8c8d; border-color:#7f8c8d;">📜 查看验证日志 (LOG)</a>
         </div>
     </div>
 </body>
