@@ -1,7 +1,14 @@
 <?php
 /**
- * 🧾 小票解析系统 - 多图并行处理版
+ * 🧾 小票解析系统 - 批量兼容版
+ * 解决 413 错误：尝试在代码层提升上传限制
  */
+
+// --- [核心修复] 尝试在代码运行瞬间撑大服务器胃口 ---
+@ini_set('upload_max_filesize', '64M');
+@ini_set('post_max_size', '64M');
+@ini_set('memory_limit', '256M');
+@ini_set('max_execution_time', '300');
 
 $endpoint = "https://24jn0321.cognitiveservices.azure.com/"; 
 $apiKey   = "BQGkM056pMBAB5KVI6wmcSLBf2JlF8X2UUiwxw5N17K9QmWljMG3JQQJ99CAACi0881XJ3w3AAAFACOGrT37"; 
@@ -10,7 +17,7 @@ $results = [];
 $storageFile = 'ocr_data.json';
 $logFile = 'ocr.log';
 
-// --- A. 下载处理 ---
+// --- A. 下载功能 (CSV & 日志) ---
 if (isset($_GET['action'])) {
     $action = $_GET['action'];
     if ($action == 'csv' && file_exists($storageFile)) {
@@ -20,9 +27,11 @@ if (isset($_GET['action'])) {
         $output = fopen('php://output', 'w');
         fputcsv($output, ['文件名', '项目', '金额']);
         $data = json_decode(file_get_contents($storageFile), true);
-        foreach ($data as $res) {
-            foreach ($res['items'] as $it) fputcsv($output, [$res['file'], $it['name'], $it['price']]);
-            fputcsv($output, [$res['file'], '合计', $res['total']]);
+        if ($data) {
+            foreach ($data as $res) {
+                foreach ($res['items'] as $it) fputcsv($output, [$res['file'], $it['name'], $it['price']]);
+                fputcsv($output, [$res['file'], '合计', $res['total']]);
+            }
         }
         fclose($output); exit;
     }
@@ -33,10 +42,11 @@ if (isset($_GET['action'])) {
     }
 }
 
-// --- B. 核心解析逻辑 ---
+// --- B. OCR 批量解析逻辑 ---
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
-    file_put_contents($logFile, "--- BATCH START: " . date('Y-m-d H:i:s') . " ---\n");
+    file_put_contents($logFile, "--- START BATCH SCAN: " . date('Y-m-d H:i:s') . " ---\n");
     
+    // 遍历上传的所有图片
     foreach ($_FILES['receipts']['tmp_name'] as $key => $tmpName) {
         if (empty($tmpName)) continue;
         
@@ -57,7 +67,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
 
         $currentItems = [];
         $sumAmount = 0;
-        $stopFlag = false;
+        $stopFlag = false; // 每张图独立重置拦截标志
         
         file_put_contents($logFile, "\n[FILE]: $fileName\n", FILE_APPEND);
 
@@ -65,17 +75,20 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
             $text = trim($lines[$i]['text']);
             $pureText = str_replace([' ', '　', '＊', '*', '◎', '√', '軽', '轻', '(', ')'], '', $text);
 
+            // 1. 红色框拦截逻辑 (针对税费、合计等干扰项)
             if (preg_match('/合計|合计|内消費税|消費税|対象|支払|残高|再発行/u', $pureText)) {
                 if (!empty($currentItems)) $stopFlag = true; 
                 continue; 
             }
             if ($stopFlag) continue;
 
+            // 2. 匹配金额
             if (preg_match('/[¥￥]([\d,]+)/u', $text, $matches)) {
                 $price = (int)str_replace(',', '', $matches[1]);
                 $nameInLine = trim(preg_replace('/[\.．…]+|[¥￥].*$/u', '', $text));
                 $cleanNameInLine = str_replace(['＊', '*', '轻', '軽', '◎', '(', ')', '.', '．', ' '], '', $nameInLine);
 
+                // 如果是纯金额行，向上找商品名
                 if (empty($cleanNameInLine) || preg_match('/^[¥￥\d,\s]+$/u', $cleanNameInLine)) {
                     $foundName = "";
                     for ($j = $i - 1; $j >= 0; $j--) {
@@ -91,6 +104,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
                     $finalName = $cleanNameInLine;
                 }
 
+                // 3. 最终校验并存入
                 if (!empty($finalName) && !preg_match('/Family|新宿|電話|登録|領収|対象|消費税|合計/u', $finalName)) {
                     $isDuplicate = false;
                     foreach ($currentItems as $item) {
@@ -101,16 +115,12 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
                     if (!$isDuplicate) {
                         $currentItems[] = ['name' => $finalName, 'price' => $price];
                         $sumAmount += $price;
+                        file_put_contents($logFile, "  -> ADDED: $finalName ($price)\n", FILE_APPEND);
                     }
                 }
             }
         }
-        // 将结果压入总数组
-        $results[] = [
-            'file' => $fileName,
-            'items' => $currentItems,
-            'total' => $sumAmount
-        ];
+        $results[] = ['file' => $fileName, 'items' => $currentItems, 'total' => $sumAmount];
     }
     file_put_contents($storageFile, json_encode($results));
 }
@@ -120,42 +130,39 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>批量小票解析系统</title>
+    <title>小票批量解析-兼容版</title>
     <style>
-        body { font-family: sans-serif; background: #f0f2f5; padding: 20px; }
-        .container { max-width: 1000px; margin: auto; }
-        .upload-section { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); text-align: center; margin-bottom: 20px; }
-        
-        /* 网格布局：一行显示两个结果卡片 */
-        .results-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(450px, 1fr)); gap: 20px; }
-        
-        .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); border-top: 4px solid #3498db; }
-        .file-name { font-size: 12px; color: #888; border-bottom: 1px solid #eee; padding-bottom: 8px; margin-bottom: 10px; display: block; }
-        .row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px dashed #f0f0f0; }
-        .total { font-size: 18px; font-weight: bold; color: #e74c3c; text-align: right; margin-top: 12px; }
-        .btn { padding: 12px 30px; background: #3498db; color: white; border: none; cursor: pointer; border-radius: 6px; font-weight: bold; font-size: 16px; }
-        .actions { margin-top: 40px; text-align: center; border-top: 1px solid #ddd; padding-top: 20px; }
-        .link-btn { text-decoration: none; padding: 10px 20px; border: 1px solid #3498db; color: #3498db; border-radius: 5px; font-weight: bold; margin: 0 10px; }
+        body { font-family: -apple-system, "Helvetica Neue", Arial, sans-serif; background: #f0f2f5; padding: 20px; color: #333; }
+        .container { max-width: 900px; margin: auto; }
+        .upload-box { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.05); text-align: center; margin-bottom: 25px; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 20px; }
+        .card { background: white; padding: 20px; border-radius: 10px; border-top: 5px solid #3498db; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+        .row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px dashed #eee; font-size: 14px; }
+        .total { font-size: 18px; font-weight: bold; color: #e74c3c; text-align: right; margin-top: 15px; }
+        .btn { background: #3498db; color: white; padding: 12px 25px; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        .actions { margin-top: 30px; display: flex; justify-content: center; gap: 15px; }
+        .link-btn { text-decoration: none; padding: 8px 18px; border: 1px solid #3498db; color: #3498db; border-radius: 4px; font-size: 14px; }
         .link-btn:hover { background: #3498db; color: white; }
     </style>
 </head>
 <body>
     <div class="container">
-        <div class="upload-section">
-            <h2>📸 批量小票智能解析</h2>
+        <div class="upload-box">
+            <h2>🧾 小票智能批量扫描</h2>
+            <p style="color:#666; font-size:14px;">支持同时上传多张图片，自动过滤税费干扰项</p>
             <form method="post" enctype="multipart/form-data">
-                <input type="file" name="receipts[]" multiple required style="margin-bottom:20px;"><br>
-                <button type="submit" class="btn">开始扫描全部图片</button>
+                <input type="file" name="receipts[]" multiple required accept="image/*" style="margin: 20px 0;"><br>
+                <button type="submit" class="btn">开始解析 (多图并行)</button>
             </form>
         </div>
 
-        <div class="results-grid">
+        <div class="grid">
             <?php if ($results): ?>
                 <?php foreach ($results as $res): ?>
                     <div class="card">
-                        <span class="file-name">📄 文件名: <?= htmlspecialchars($res['file']) ?></span>
+                        <small style="color:#999">📄 <?= htmlspecialchars($res['file']) ?></small>
                         <?php if (empty($res['items'])): ?>
-                            <p style="color:#999; text-align:center;">未识别到有效商品</p>
+                            <p style="color:#bbb; text-align:center; padding:20px;">未检测到有效商品</p>
                         <?php else: ?>
                             <?php foreach ($res['items'] as $it): ?>
                                 <div class="row">
@@ -163,18 +170,18 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
                                     <span>¥<?= number_format($it['price']) ?></span>
                                 </div>
                             <?php endforeach; ?>
-                            <div class="total">合计金额：¥<?= number_format($res['total']) ?></div>
+                            <div class="total">合计 ¥<?= number_format($res['total']) ?></div>
                         <?php endif; ?>
                     </div>
                 <?php endforeach; ?>
             <?php endif; ?>
         </div>
 
-        <?php if ($results): ?>
-        <div class="actions">
-            <a href="?action=csv" class="link-btn">📥 下载汇总 CSV 报表</a>
-            <a href="?action=log" class="link-btn" style="color:#7f8c8d; border-color:#7f8c8d;">📜 查看解析日志 (ocr.log)</a>
-        </div>
+        <?php if ($results || file_exists($storageFile)): ?>
+            <div class="actions">
+                <a href="?action=csv" class="link-btn" style="background:#2ecc71; color:white; border:none;">📥 下载汇总报表 (CSV)</a>
+                <a href="?action=log" class="link-btn">📜 下载调试日志 (ocr.log)</a>
+            </div>
         <?php endif; ?>
     </div>
 </body>
