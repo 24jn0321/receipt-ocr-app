@@ -1,17 +1,15 @@
 <?php
 /**
- * 🧾 小票解析系统 - Azure SQL データベース統合版
- * 修改说明：修复重复录入问题，支持多张显示，包含日志下载功能。
+ * 🧾 小票解析系统 - 页面重置版
+ * 修改说明：移除数据库删除功能，改为“清空页面显示”。
  */
 
 // --- 1. 配置与環境設置 ---
 @set_time_limit(600);
 @ini_set('memory_limit', '512M');
 
-// Azure OCR API 設定
 $endpoint = "https://24jn0321.cognitiveservices.azure.com/"; 
 $apiKey   = "BQGkM056pMBAB5KVI6wmcSLBf2JlF8X2UUiwxw5N17K9QmWljMG3JQQJ99CAACi0881XJ3w3AAAFACOGrT37"; 
-
 $logFile = 'ocr.log';
 
 // --- 2. Azure SQL 接続設定 ---
@@ -31,6 +29,7 @@ if ($conn === false) {
 if (isset($_GET['action'])) {
     $action = $_GET['action'];
     
+    // 导出 CSV 功能保留
     if ($action == 'csv') {
         header('Content-Type: text/csv; charset=utf-8');
         header('Content-Disposition: attachment; filename=receipt_export_'.date('Ymd').'.csv');
@@ -49,14 +48,14 @@ if (isset($_GET['action'])) {
         if (file_exists($logFile)) {
             header('Content-Type: text/plain');
             header('Content-Disposition: attachment; filename="ocr.log"');
-            readfile($logFile);
-            exit;
+            readfile($logFile); exit;
         }
     }
 
-    if ($action == 'clear') {
-        sqlsrv_query($conn, "DELETE FROM receipts");
-        header("Location: " . strtok($_SERVER["REQUEST_URI"], '?')); exit;
+    // --- 修改点：这里不再执行 DELETE 语句，只是刷新页面清除 POST 状态 ---
+    if ($action == 'clear_view') {
+        header("Location: " . strtok($_SERVER["PHP_SELF"], '?')); 
+        exit;
     }
 }
 
@@ -97,7 +96,6 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
 
         for ($i = 0; $i < count($lines); $i++) {
             $text = trim($lines[$i]['text']);
-            // 清理掉常见的干扰符
             $pureText = str_replace([' ', '　', '＊', '*', '√', '軽', '轻', '(', ')', '8%', '10%', '◎'], '', $text);
 
             if (preg_match('/合計|合计|内消費税|消費税|対象|支払|残高|再発行/u', $pureText)) {
@@ -126,12 +124,10 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
                 }
 
                 if (!empty($finalName) && !preg_match('/Family|新宿|電話|登録|領収|対象|消費税|合計|内訳/u', $finalName)) {
-                    // --- 关键修复：增加去重检查 ---
                     $isDuplicate = false;
                     foreach ($currentItems as $existing) {
                         if ($existing['name'] === $finalName && $existing['price'] === $price) {
-                            $isDuplicate = true;
-                            break;
+                            $isDuplicate = true; break;
                         }
                     }
                     if (!$isDuplicate) {
@@ -183,7 +179,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && !empty($processedIds)) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Azure SQL 小票解析汇总</title>
+    <title>Azure SQL 小票解析</title>
     <style>
         body { font-family: 'PingFang SC', sans-serif; background: #f4f7f9; padding: 20px; color: #333; }
         .box { max-width: 600px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 8px 30px rgba(0,0,0,0.05); }
@@ -193,12 +189,13 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && !empty($processedIds)) {
         .amount-big { font-size: 32px; font-weight: bold; color: #ff4d4f; }
         .btn-main { width: 100%; padding: 15px; background: #1890ff; color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; }
         .nav-bar { margin-top: 25px; display: flex; justify-content: space-around; border-top: 1px solid #eee; padding-top: 15px; }
-        .nav-link { font-size: 13px; color: #666; text-decoration: none; padding: 6px 12px; border: 1px solid #ddd; border-radius: 4px; }
+        .nav-link { font-size: 12px; color: #666; text-decoration: none; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; background: #fff; }
+        .nav-link:hover { background: #f9f9f9; }
     </style>
 </head>
 <body>
     <div class="box">
-        <h2 style="text-align:center;">📜 小票解析汇总 (SQL版)</h2>
+        <h2 style="text-align:center;">📜 小票解析 (仅显示本次)</h2>
         <form id="uploadForm" method="post" enctype="multipart/form-data">
             <input type="file" id="fileInput" name="receipts[]" multiple required style="margin-bottom:20px; width: 100%;">
             <button type="submit" id="submitBtn" class="btn-main">开始解析并存入DB</button>
@@ -229,7 +226,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && !empty($processedIds)) {
         <div class="nav-bar">
             <a href="?action=csv" class="nav-link">📥 导出 CSV</a>
             <a href="?action=download_log" class="nav-link">📝 下载日志</a>
-            <a href="?action=clear" class="nav-link" style="color:#ff4d4f;" onclick="return confirm('确定清空数据库吗？')">🗑️ 清空数据库</a>
+            <a href="?action=clear_view" class="nav-link" style="color:#1890ff;">🔄 清空页面</a>
         </div>
     </div>
 
