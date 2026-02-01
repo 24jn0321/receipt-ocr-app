@@ -1,6 +1,7 @@
 <?php
 /**
  * 🧾 小票解析系统 - Azure SQL データベース統合版
+ * 修改说明：打开页面时不显示历史记录，仅在上传后显示本次解析结果。
  */
 
 // --- 1. 配置与環境設置 ---
@@ -13,7 +14,7 @@ $apiKey   = "BQGkM056pMBAB5KVI6wmcSLBf2JlF8X2UUiwxw5N17K9QmWljMG3JQQJ99CAACi0881
 
 $logFile = 'ocr.log';
 
-// --- 2. Azure SQL 接続設定 (ここを書き換えてください) ---
+// --- 2. Azure SQL 接続設定 ---
 $serverName = "tcp:receipt-server-24jn0.database.windows.net,1433"; 
 $connectionOptions = array(
     "Database" => "receiptdb",
@@ -26,17 +27,17 @@ if ($conn === false) {
     die("<pre>" . print_r(sqlsrv_errors(), true) . "</pre>");
 }
 
-// --- 3. 動作処理 (CSV/ログ/清空) ---
+// --- 3. 动作处理 (CSV/清空) ---
 if (isset($_GET['action'])) {
     $action = $_GET['action'];
     
-    // CSV出力 (DBから生成)
+    // CSV输出 (导出完整历史记录)
     if ($action == 'csv') {
         header('Content-Type: text/csv; charset=utf-8');
         header('Content-Disposition: attachment; filename=receipt_export_'.date('Ymd').'.csv');
         echo "\xEF\xBB\xBF"; 
         $output = fopen('php://output', 'w');
-        fputcsv($output, ['ID', '文件名', '项目', '金额', '日期']);
+        fputcsv($output, ['文件名', '项目', '金额', '日期']);
         
         $sql = "SELECT r.file_name, r.processed_at, i.item_name, i.price 
                 FROM receipts r JOIN receipt_items i ON r.id = i.receipt_id";
@@ -48,19 +49,19 @@ if (isset($_GET['action'])) {
     }
 
     if ($action == 'clear') {
-        // 子テーブルは CASCADE 設定により親を消せば消えます
         sqlsrv_query($conn, "DELETE FROM receipts");
         header("Location: " . strtok($_SERVER["REQUEST_URI"], '?')); exit;
     }
 }
 
-// --- 4. OCR 核心解析ロジック ---
+// --- 4. OCR 核心解析逻辑 ---
+$receiptId = null; // 用于存储最后一张解析的小票ID
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
     file_put_contents($logFile, "\n[" . date('Y-m-d H:i:s') . "] --- 开始識別任務 ---\n", FILE_APPEND);
     
     foreach ($_FILES['receipts']['tmp_name'] as $key => $tmpName) {
         if (empty($tmpName)) continue;
-        if ($key > 0) sleep(1); // API負荷軽減
+        if ($key > 0) sleep(1);
 
         $fileName = $_FILES['receipts']['name'][$key];
         $imgData = file_get_contents($tmpName);
@@ -137,7 +138,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
             $sqlR = "INSERT INTO receipts (file_name) OUTPUT INSERTED.id VALUES (?)";
             $stmtR = sqlsrv_query($conn, $sqlR, array($fileName));
             if ($stmtR && sqlsrv_fetch($stmtR)) {
-                $receiptId = sqlsrv_get_field($stmtR, 0);
+                $receiptId = sqlsrv_get_field($stmtR, 0); // 记录下当前处理的ID
                 foreach ($currentItems as $it) {
                     $sqlI = "INSERT INTO receipt_items (receipt_id, item_name, price) VALUES (?, ?, ?)";
                     sqlsrv_query($conn, $sqlI, array($receiptId, $it['name'], $it['price']));
@@ -148,21 +149,26 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
     }
 }
 
-// --- 5. 表示用データの読み取り ---
+// --- 5. 表示用データの読み取り (仅在 POST 后显示本次结果) ---
 $results = [];
 $totalAllAmount = 0;
-$sqlMain = "SELECT id, file_name FROM receipts ORDER BY processed_at DESC";
-$resMain = sqlsrv_query($conn, $sqlMain);
-if ($resMain) {
-    while ($row = sqlsrv_fetch_array($resMain, SQLSRV_FETCH_ASSOC)) {
-        $items = [];
-        $sqlSub = "SELECT item_name as name, price FROM receipt_items WHERE receipt_id = ?";
-        $resSub = sqlsrv_query($conn, $sqlSub, array($row['id']));
-        while ($it = sqlsrv_fetch_array($resSub, SQLSRV_FETCH_ASSOC)) {
-            $items[] = $it;
-            $totalAllAmount += $it['price'];
+
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($receiptId)) {
+    // 仅查询最后一次插入的 ID 相关的数据，不查全表
+    $sqlMain = "SELECT id, file_name FROM receipts WHERE id = ?";
+    $resMain = sqlsrv_query($conn, $sqlMain, array($receiptId));
+    
+    if ($resMain) {
+        while ($row = sqlsrv_fetch_array($resMain, SQLSRV_FETCH_ASSOC)) {
+            $items = [];
+            $sqlSub = "SELECT item_name as name, price FROM receipt_items WHERE receipt_id = ?";
+            $resSub = sqlsrv_query($conn, $sqlSub, array($row['id']));
+            while ($it = sqlsrv_fetch_array($resSub, SQLSRV_FETCH_ASSOC)) {
+                $items[] = $it;
+                $totalAllAmount += $it['price'];
+            }
+            $results[] = ['file' => $row['file_name'], 'items' => $items];
         }
-        $results[] = ['file' => $row['file_name'], 'items' => $items];
     }
 }
 ?>
@@ -197,6 +203,7 @@ if ($resMain) {
 
         <?php if ($results): ?>
             <div style="margin-top:30px;">
+                <h3 style="font-size: 16px; color: #1890ff;">✅ 本次解析结果：</h3>
                 <?php foreach ($results as $res): ?>
                     <div class="card">
                         <small style="color:#aaa;">📄 <?= htmlspecialchars($res['file']) ?></small>
@@ -210,15 +217,15 @@ if ($resMain) {
                 <?php endforeach; ?>
 
                 <div class="grand-total">
-                    <div>DB累计金額</div>
+                    <div>本次解析总金額</div>
                     <div class="amount-big">¥<?= number_format($totalAllAmount) ?></div>
                 </div>
             </div>
         <?php endif; ?>
 
         <div class="nav-bar">
-            <a href="?action=csv" class="nav-link">📥 导出 CSV</a>
-            <a href="?action=clear" class="nav-link" style="color:#ff4d4f;" onclick="return confirm('确定清空DB吗？')">🗑️ 清空重置</a>
+            <a href="?action=csv" class="nav-link">📥 导出历史记录 (CSV)</a>
+            <a href="?action=clear" class="nav-link" style="color:#ff4d4f;" onclick="return confirm('确定清空数据库中的所有历史记录吗？')">🗑️ 清空数据库</a>
         </div>
     </div>
 
