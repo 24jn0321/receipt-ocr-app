@@ -1,7 +1,7 @@
 <?php
 /**
  * 🧾 小票解析系统 - Azure SQL データベース統合版
- * 修改说明：修复多张上传只显示一张的问题，保留日志下载功能。
+ * 修改说明：修复重复录入问题，支持多张显示，包含日志下载功能。
  */
 
 // --- 1. 配置与環境設置 ---
@@ -27,7 +27,7 @@ if ($conn === false) {
     die("<pre>" . print_r(sqlsrv_errors(), true) . "</pre>");
 }
 
-// --- 3. 动作处理 (CSV/清空/日志下载) ---
+// --- 3. 动作处理 ---
 if (isset($_GET['action'])) {
     $action = $_GET['action'];
     
@@ -61,7 +61,7 @@ if (isset($_GET['action'])) {
 }
 
 // --- 4. OCR 核心解析逻辑 ---
-$processedIds = []; // 修改：用数组存储本次所有生成的ID
+$processedIds = []; 
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
     file_put_contents($logFile, "\n[" . date('Y-m-d H:i:s') . "] --- 开始識別任務 ---\n", FILE_APPEND);
     
@@ -97,29 +97,46 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
 
         for ($i = 0; $i < count($lines); $i++) {
             $text = trim($lines[$i]['text']);
-            $pureText = str_replace([' ', '　', '＊', '*', '√', '軽', '轻', '(', ')', '8%', '10%'], '', $text);
+            // 清理掉常见的干扰符
+            $pureText = str_replace([' ', '　', '＊', '*', '√', '軽', '轻', '(', ')', '8%', '10%', '◎'], '', $text);
+
             if (preg_match('/合計|合计|内消費税|消費税|対象|支払|残高|再発行/u', $pureText)) {
                 if (!empty($currentItems)) $stopFlag = true; 
                 continue; 
             }
             if ($stopFlag) continue;
+
             if (preg_match('/[¥￥]([\d,]+)/u', $text, $matches)) {
                 $price = (int)str_replace(',', '', $matches[1]);
                 $nameInLine = trim(preg_replace('/[\.．…]+|[¥￥].*$/u', '', $text));
-                $cleanNameInLine = str_replace(['＊', '*', '轻', '軽', '(', ')', '.', '．', ' '], '', $nameInLine);
+                $cleanNameInLine = str_replace(['＊', '*', '轻', '軽', '(', ')', '.', '．', ' ', '◎'], '', $nameInLine);
+
                 if (mb_strlen($cleanNameInLine) < 2 || preg_match('/^[¥￥\d,\s]+$/u', $cleanNameInLine)) {
                     $foundName = "";
                     for ($j = $i - 1; $j >= 0; $j--) {
                         $prev = trim($lines[$j]['text']);
-                        $cleanPrev = str_replace(['＊', '*', ' ', '√', '軽', '轻'], '', $prev);
+                        $cleanPrev = str_replace(['＊', '*', ' ', '√', '軽', '轻', '◎'], '', $prev);
                         if (mb_strlen($cleanPrev) >= 2 && !preg_match('/領|収|証|合|计|計|%|店|电话|電話|¥|￥/u', $cleanPrev)) {
                             $foundName = $cleanPrev; break;
                         }
                     }
                     $finalName = $foundName;
-                } else { $finalName = $cleanNameInLine; }
+                } else {
+                    $finalName = $cleanNameInLine;
+                }
+
                 if (!empty($finalName) && !preg_match('/Family|新宿|電話|登録|領収|対象|消費税|合計|内訳/u', $finalName)) {
-                    $currentItems[] = ['name' => $finalName, 'price' => $price];
+                    // --- 关键修复：增加去重检查 ---
+                    $isDuplicate = false;
+                    foreach ($currentItems as $existing) {
+                        if ($existing['name'] === $finalName && $existing['price'] === $price) {
+                            $isDuplicate = true;
+                            break;
+                        }
+                    }
+                    if (!$isDuplicate) {
+                        $currentItems[] = ['name' => $finalName, 'price' => $price];
+                    }
                 }
             }
         }
@@ -129,12 +146,11 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
             $stmtR = sqlsrv_query($conn, $sqlR, array($fileName));
             if ($stmtR && sqlsrv_fetch($stmtR)) {
                 $newId = sqlsrv_get_field($stmtR, 0);
-                $processedIds[] = $newId; // 收集 ID
+                $processedIds[] = $newId; 
                 foreach ($currentItems as $it) {
                     $sqlI = "INSERT INTO receipt_items (receipt_id, item_name, price) VALUES (?, ?, ?)";
                     sqlsrv_query($conn, $sqlI, array($newId, $it['name'], $it['price']));
                 }
-                file_put_contents($logFile, "  [DB SUCCESS] $fileName (ID: $newId)\n", FILE_APPEND);
             }
         }
     }
@@ -145,15 +161,13 @@ $results = [];
 $totalAllAmount = 0;
 
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && !empty($processedIds)) {
-    // 修改：使用 IN 语句查询本次上传的所有小票
     $idList = implode(',', $processedIds);
     $sqlMain = "SELECT id, file_name FROM receipts WHERE id IN ($idList)";
     $resMain = sqlsrv_query($conn, $sqlMain);
-    
     if ($resMain) {
         while ($row = sqlsrv_fetch_array($resMain, SQLSRV_FETCH_ASSOC)) {
             $items = [];
-            $sqlSub = "SELECT item_name as name, price FROM receipt_items WHERE receipt_id = ?";
+            $sqlSub = "SELECT item_name as name, price FROM receipt_items WHERE receipt_id = ? ORDER BY id ASC";
             $resSub = sqlsrv_query($conn, $sqlSub, array($row['id']));
             while ($it = sqlsrv_fetch_array($resSub, SQLSRV_FETCH_ASSOC)) {
                 $items[] = $it;
@@ -180,7 +194,6 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && !empty($processedIds)) {
         .btn-main { width: 100%; padding: 15px; background: #1890ff; color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; }
         .nav-bar { margin-top: 25px; display: flex; justify-content: space-around; border-top: 1px solid #eee; padding-top: 15px; }
         .nav-link { font-size: 13px; color: #666; text-decoration: none; padding: 6px 12px; border: 1px solid #ddd; border-radius: 4px; }
-        #status { color: #1890ff; text-align: center; margin-top: 10px; font-size: 13px; }
     </style>
 </head>
 <body>
@@ -189,7 +202,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && !empty($processedIds)) {
         <form id="uploadForm" method="post" enctype="multipart/form-data">
             <input type="file" id="fileInput" name="receipts[]" multiple required style="margin-bottom:20px; width: 100%;">
             <button type="submit" id="submitBtn" class="btn-main">开始解析并存入DB</button>
-            <div id="status" style="display:none;">准备中...</div>
+            <div id="status" style="display:none; text-align:center; margin-top:10px; color:#1890ff;">准备中...</div>
         </form>
 
         <?php if ($results): ?>
@@ -216,7 +229,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && !empty($processedIds)) {
         <div class="nav-bar">
             <a href="?action=csv" class="nav-link">📥 导出 CSV</a>
             <a href="?action=download_log" class="nav-link">📝 下载日志</a>
-            <a href="?action=clear" class="nav-link" style="color:#ff4d4f;" onclick="return confirm('确定清空数据库中的所有历史记录吗？')">🗑️ 清空数据库</a>
+            <a href="?action=clear" class="nav-link" style="color:#ff4d4f;" onclick="return confirm('确定清空数据库吗？')">🗑️ 清空数据库</a>
         </div>
     </div>
 
