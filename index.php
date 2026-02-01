@@ -124,43 +124,54 @@ if ($results) {
 
 <style>
 :root {
+    --bg: #f8fafc;
+    --card: #ffffff;
     --text-main: #0f172a;
     --text-sub: #64748b;
     --accent: #2563eb;
-    --bg: #f8fafc;
-    --card-bg: #ffffff;
     --border: #e5e7eb;
 }
+
+@media (prefers-color-scheme: dark) {
+:root {
+    --bg: #020617;
+    --card: #020617;
+    --text-main: #e5e7eb;
+    --text-sub: #94a3b8;
+    --accent: #60a5fa;
+    --border: #1e293b;
+}}
 
 * { box-sizing: border-box; }
 
 body {
     margin: 0;
-    padding: 40px 16px;
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display",
-        "PingFang SC", "Microsoft YaHei", sans-serif;
+    padding: 48px 16px;
     background: var(--bg);
     color: var(--text-main);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display",
+        "PingFang SC", "Microsoft YaHei", sans-serif;
     -webkit-font-smoothing: antialiased;
 }
 
-.app-container {
-    max-width: 520px;
-    margin: 0 auto;
-    background: var(--card-bg);
-    border-radius: 14px;
-    padding: 40px 32px 48px;
-    box-shadow:
-        0 10px 30px rgba(0,0,0,.06),
-        0 1px 3px rgba(0,0,0,.05);
+.app {
+    max-width: 540px;
+    margin: auto;
+    background: var(--card);
+    border-radius: 18px;
+    padding: 44px 36px 52px;
+    box-shadow: 0 30px 80px rgba(0,0,0,.25);
+    animation: fadeUp .6s ease;
+}
+
+@keyframes fadeUp {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: none; }
 }
 
 /* Header */
-header {
-    margin-bottom: 48px;
-}
 header h1 {
-    font-size: 30px;
+    font-size: 32px;
     font-weight: 700;
     margin: 0;
 }
@@ -168,258 +179,190 @@ header p {
     margin-top: 6px;
     font-size: 14px;
     color: var(--text-sub);
-    letter-spacing: .2px;
 }
 
 /* Upload */
-.upload-area {
-    margin-bottom: 20px;
-}
-
 .upload-box {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    padding: 20px;
+    margin-top: 36px;
+    padding: 26px;
+    border-radius: 14px;
     border: 1.5px dashed var(--border);
-    border-radius: 12px;
+    text-align: center;
     cursor: pointer;
-    transition: .25s;
+    transition: .3s;
 }
-.upload-box:hover {
+.upload-box.drag {
+    background: rgba(96,165,250,.08);
     border-color: var(--accent);
-    background: #f1f5ff;
 }
-
-.upload-icon {
-    font-size: 28px;
-}
-
-.upload-text strong {
+.upload-box strong {
     display: block;
-    font-size: 15px;
+    font-size: 16px;
 }
-.upload-text span {
-    display: block;
-    margin-top: 2px;
-    font-size: 12px;
+.upload-box span {
+    font-size: 13px;
     color: var(--text-sub);
 }
 
-.btn-submit {
+.btn {
     margin-top: 22px;
     width: 100%;
     padding: 16px;
-    background: linear-gradient(180deg, #111827, #020617);
-    color: #fff;
-    border: none;
-    border-radius: 10px;
     font-size: 15px;
-    font-weight: 500;
+    border-radius: 12px;
+    border: none;
+    background: linear-gradient(180deg, #2563eb, #1e40af);
+    color: white;
     cursor: pointer;
     transition: .2s;
 }
-.btn-submit:hover { opacity: .9; transform: translateY(-1px); }
-.btn-submit:disabled {
-    background: #e5e7eb;
-    color: #94a3b8;
+.btn:hover { transform: translateY(-1px); }
+.btn:disabled {
+    background: #334155;
     cursor: not-allowed;
-    transform: none;
 }
 
+/* Status */
 #status {
     margin-top: 14px;
     font-size: 13px;
     text-align: center;
     color: var(--accent);
-    font-variant-numeric: tabular-nums;
 }
 
-/* Results */
-.receipt-group {
-    margin-top: 56px;
+/* Skeleton */
+.skeleton {
+    margin-top: 40px;
+}
+.sk-row {
+    height: 16px;
+    background: linear-gradient(
+        90deg,
+        var(--border),
+        rgba(255,255,255,.2),
+        var(--border)
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.2s infinite;
+    border-radius: 6px;
+    margin-bottom: 14px;
+}
+@keyframes shimmer {
+    from { background-position: 200% 0; }
+    to { background-position: -200% 0; }
 }
 
-.file-label {
-    display: block;
-    margin-top: 36px;
-    margin-bottom: 10px;
-    font-size: 11px;
-    letter-spacing: 1px;
-    text-transform: uppercase;
-    color: var(--text-sub);
-    border-bottom: 1px solid #f1f5f9;
-    padding-bottom: 4px;
-}
-
-.item-row {
+/* Result */
+.item {
     display: flex;
     justify-content: space-between;
-    align-items: baseline;
     padding: 14px 0;
-    border-bottom: 1px solid #fafafa;
+    border-bottom: 1px solid rgba(255,255,255,.04);
 }
-
-.item-name {
-    flex: 1;
-    padding-right: 20px;
-    font-size: 15px;
-}
-
-.item-price {
-    font-size: 15px;
-    font-weight: 500;
+.price {
     font-family: "SF Mono", Consolas, monospace;
 }
 
-/* Summary */
-.summary-box {
-    margin-top: 72px;
-    padding-top: 28px;
+.total {
+    margin-top: 60px;
+    padding-top: 24px;
     border-top: 1px solid var(--border);
     display: flex;
     justify-content: space-between;
     align-items: flex-end;
-    background: linear-gradient(180deg, #fff, #f8fafc);
 }
-
-.total-title {
-    font-size: 15px;
-    color: var(--text-sub);
+.total strong {
+    font-size: 44px;
 }
-
-.total-amount {
-    font-size: 46px;
-    font-weight: 700;
-    letter-spacing: -1px;
-}
-.total-amount span {
-    font-size: 20px;
-    margin-right: 4px;
-    font-weight: 400;
-}
-
-/* Footer */
-.footer-links {
+.footer {
     margin-top: 48px;
-    display: flex;
-    justify-content: center;
-    gap: 24px;
+    text-align: center;
 }
-
-.link {
-    font-size: 13px;
+.footer a {
     color: var(--text-sub);
     text-decoration: none;
-    border-bottom: 1px solid transparent;
-    transition: .2s;
+    font-size: 13px;
+    margin: 0 12px;
 }
-.link:hover {
-    color: var(--text-main);
-    border-bottom-color: var(--text-main);
-}
+.footer a:hover { color: var(--text-main); }
 </style>
 </head>
 
 <body>
-<div class="app-container">
+<div class="app">
 
 <header>
     <h1>小票解析</h1>
     <p>Intelligence in simplicity.</p>
 </header>
 
-<div class="upload-area">
-<form id="uploadForm" method="post" enctype="multipart/form-data">
-    <label class="upload-box">
-        <input type="file" id="fileInput" name="receipts[]" multiple required hidden>
-        <div class="upload-icon">📄</div>
-        <div class="upload-text">
-            <strong>选择小票图片</strong>
-            <span>支持多张，自动压缩与识别</span>
-        </div>
-    </label>
-
-    <button type="submit" id="submitBtn" class="btn-submit">开始解析</button>
-    <div id="status"></div>
+<form id="uploadForm" enctype="multipart/form-data">
+<label class="upload-box" id="drop">
+    <input type="file" id="fileInput" name="receipts[]" multiple hidden>
+    <strong>拖拽或点击上传小票</strong>
+    <span>自动压缩 · OCR 解析 · 汇总</span>
+</label>
+<button class="btn" id="btn">开始解析</button>
+<div id="status"></div>
 </form>
-</div>
 
 <?php if ($results): ?>
-<div class="receipt-group">
 <?php foreach ($results as $res): ?>
-    <span class="file-label"><?= htmlspecialchars($res['file']) ?></span>
-    <?php foreach ($res['items'] as $it): ?>
-        <div class="item-row">
-            <span class="item-name"><?= htmlspecialchars($it['name']) ?></span>
-            <span class="item-price">¥<?= number_format($it['price']) ?></span>
-        </div>
-    <?php endforeach; ?>
+<?php foreach ($res['items'] as $it): ?>
+<div class="item">
+    <span><?= htmlspecialchars($it['name']) ?></span>
+    <span class="price">¥<?= number_format($it['price']) ?></span>
+</div>
+<?php endforeach; ?>
 <?php endforeach; ?>
 
-<div class="summary-box">
-    <div class="total-title">合计</div>
-    <div class="total-amount"><span>¥</span><?= number_format($totalAllAmount) ?></div>
-</div>
+<div class="total">
+    <span>合计</span>
+    <strong>¥<?= number_format($totalAllAmount) ?></strong>
 </div>
 <?php endif; ?>
 
-<div class="footer-links">
-    <a href="?action=csv" class="link">CSV 导出</a>
-    <a href="?action=log" class="link">运行日志</a>
+<div class="footer">
+    <a href="?action=csv">CSV 导出</a>
+    <a href="?action=log">运行日志</a>
 </div>
 
 </div>
 
 <script>
-document.getElementById('uploadForm').onsubmit = async function(e) {
+const drop = document.getElementById('drop');
+const input = document.getElementById('fileInput');
+const status = document.getElementById('status');
+const btn = document.getElementById('btn');
+
+drop.onclick = () => input.click();
+
+['dragenter','dragover'].forEach(e =>
+    drop.addEventListener(e, ev => {
+        ev.preventDefault();
+        drop.classList.add('drag');
+    })
+);
+['dragleave','drop'].forEach(e =>
+    drop.addEventListener(e, () => drop.classList.remove('drag'))
+);
+drop.ondrop = e => {
     e.preventDefault();
-    const btn = document.getElementById('submitBtn');
-    const status = document.getElementById('status');
-    const files = document.getElementById('fileInput').files;
-    if (!files.length) return;
-
-    btn.disabled = true;
-    status.innerText = "处理中...";
-
-    const formData = new FormData();
-    for (let i = 0; i < files.length; i++) {
-        status.innerText = `压缩图像 (${i+1}/${files.length})`;
-        const f = await compressImage(files[i]);
-        formData.append('receipts[]', f, files[i].name);
-    }
-
-    status.innerText = "识别请求中...";
-    fetch('', { method: 'POST', body: formData })
-        .then(r => r.text())
-        .then(html => {
-            const doc = new DOMParser().parseFromString(html, 'text/html');
-            document.body.innerHTML = doc.body.innerHTML;
-        });
+    input.files = e.dataTransfer.files;
 };
 
-function compressImage(file) {
-    return new Promise(resolve => {
-        const reader = new FileReader();
-        reader.readAsDataURL(file);
-        reader.onload = e => {
-            const img = new Image();
-            img.src = e.target.result;
-            img.onload = () => {
-                const canvas = document.createElement('canvas');
-                const w = 1200;
-                canvas.width = w;
-                canvas.height = img.height * (w / img.width);
-                canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
-                canvas.toBlob(b =>
-                    resolve(new File([b], file.name, { type: 'image/jpeg' })),
-                    'image/jpeg', 0.85
-                );
-            };
-        };
-    });
-}
+document.getElementById('uploadForm').onsubmit = async e => {
+    e.preventDefault();
+    btn.disabled = true;
+    status.innerText = "解析中…";
+    const fd = new FormData();
+    for (let f of input.files) fd.append('receipts[]', f, f.name);
+    const r = await fetch('', { method: 'POST', body: fd });
+    document.body.innerHTML =
+        new DOMParser().parseFromString(await r.text(), 'text/html').body.innerHTML;
+};
 </script>
 </body>
 </html>
+
 
