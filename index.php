@@ -1,9 +1,10 @@
 <?php
 /**
- * 🧾 小票解析系统 - 稳定修复版
+ * 🧾 小票解析系统 - 终极稳定去重版
+ * 功能：多图上传、自动压缩、追加保存、智能去重、保留◎
  */
 
-// --- 1. 配置与环境 ---
+// --- 1. 配置与环境设置 ---
 @set_time_limit(600);
 @ini_set('memory_limit', '512M');
 
@@ -13,10 +14,9 @@ $apiKey   = "BQGkM056pMBAB5KVI6wmcSLBf2JlF8X2UUiwxw5N17K9QmWljMG3JQQJ99CAACi0881
 $storageFile = 'ocr_data.json';
 $logFile = 'ocr.log';
 
-// --- 2. 功能接口 (CSV/LOG/CLEAR) ---
+// --- 2. 接口处理 (CSV下载/日志/清空) ---
 if (isset($_GET['action'])) {
     $action = $_GET['action'];
-    // 导出 CSV
     if ($action == 'csv' && file_exists($storageFile)) {
         header('Content-Type: text/csv; charset=utf-8');
         header('Content-Disposition: attachment; filename=receipt_export_'.date('Ymd').'.csv');
@@ -31,15 +31,13 @@ if (isset($_GET['action'])) {
         }
         fclose($output); exit;
     }
-    // 查看日志
     if ($action == 'log' && file_exists($logFile)) {
         header('Content-Type: text/plain; charset=utf-8');
         readfile($logFile); exit;
     }
-    // 清空数据
     if ($action == 'clear') {
         if (file_exists($storageFile)) unlink($storageFile);
-        header("Location: index.php"); exit;
+        header("Location: " . strtok($_SERVER["REQUEST_URI"], '?')); exit;
     }
 }
 
@@ -47,12 +45,12 @@ if (isset($_GET['action'])) {
 $results = file_exists($storageFile) ? json_decode(file_get_contents($storageFile), true) : [];
 
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
-    file_put_contents($logFile, "\n[" . date('Y-m-d H:i:s') . "] 开始新扫描任务...\n", FILE_APPEND);
+    file_put_contents($logFile, "\n[" . date('Y-m-d H:i:s') . "] --- 开始识别任务 ---\n", FILE_APPEND);
     
     $newResults = [];
     foreach ($_FILES['receipts']['tmp_name'] as $key => $tmpName) {
         if (empty($tmpName)) continue;
-        if ($key > 0) sleep(2); // 免费版 API 必须间隔
+        if ($key > 0) sleep(2); // 避免触发 API 频率限制
 
         $fileName = $_FILES['receipts']['name'][$key];
         $imgData = file_get_contents($tmpName);
@@ -71,7 +69,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
         curl_close($ch);
 
         if ($httpCode !== 200) {
-            file_put_contents($logFile, "  [ERROR] $fileName 接口请求失败: HTTP $httpCode - $response\n", FILE_APPEND);
+            file_put_contents($logFile, "  [ERROR] $fileName 请求失败: HTTP $httpCode\n", FILE_APPEND);
             continue; 
         }
 
@@ -82,19 +80,23 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
 
         for ($i = 0; $i < count($lines); $i++) {
             $text = trim($lines[$i]['text']);
+            // 过滤无用字符但保留 ◎
             $pureText = str_replace([' ', '　', '＊', '*', '√', '軽', '轻', '(', ')', '8%', '10%'], '', $text);
 
+            // 遇到合计/税额等关键词停止解析后续条目
             if (preg_match('/合計|合计|内消費税|消費税|対象|支払|残高|再発行/u', $pureText)) {
                 if (!empty($currentItems)) $stopFlag = true; 
                 continue; 
             }
             if ($stopFlag) continue;
 
+            // 匹配金额行
             if (preg_match('/[¥￥]([\d,]+)/u', $text, $matches)) {
                 $price = (int)str_replace(',', '', $matches[1]);
                 $nameInLine = trim(preg_replace('/[\.．…]+|[¥￥].*$/u', '', $text));
                 $cleanNameInLine = str_replace(['＊', '*', '轻', '軽', '(', ')', '.', '．', ' '], '', $nameInLine);
 
+                // 名字提取逻辑 (如果本行名字太短则向上回溯)
                 if (mb_strlen($cleanNameInLine) < 2 || preg_match('/^[¥￥\d,\s]+$/u', $cleanNameInLine)) {
                     $foundName = "";
                     for ($j = $i - 1; $j >= 0; $j--) {
@@ -110,21 +112,31 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
                     $finalName = $cleanNameInLine;
                 }
 
+                // --- 智能去重逻辑 ---
                 if (!empty($finalName) && !preg_match('/Family|新宿|電話|登録|領収|対象|消費税|合計|内訳/u', $finalName)) {
-                    $currentItems[] = ['name' => $finalName, 'price' => $price];
+                    $isDuplicate = false;
+                    foreach ($currentItems as $existingItem) {
+                        if ($existingItem['name'] === $finalName && $existingItem['price'] === $price) {
+                            $isDuplicate = true;
+                            break;
+                        }
+                    }
+                    if (!$isDuplicate) {
+                        $currentItems[] = ['name' => $finalName, 'price' => $price];
+                    }
                 }
             }
         }
         $newResults[] = ['file' => $fileName, 'items' => $currentItems];
-        file_put_contents($logFile, "  [SUCCESS] $fileName 解析完成，提取条目: " . count($currentItems) . "\n", FILE_APPEND);
+        file_put_contents($logFile, "  [SUCCESS] $fileName 处理成功\n", FILE_APPEND);
     }
     
-    // 合并并保存 (关键：不覆盖之前的历史数据)
+    // 合并新旧数据并保存
     $results = array_merge($results, $newResults);
     file_put_contents($storageFile, json_encode($results, JSON_UNESCAPED_UNICODE));
 }
 
-// 计算总额
+// 计算累计金额
 $totalAllAmount = 0;
 foreach ($results as $res) {
     foreach ($res['items'] as $it) { $totalAllAmount += $it['price']; }
@@ -135,108 +147,114 @@ foreach ($results as $res) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>小票汇总系统 v2.0</title>
+    <title>小票解析汇总系统</title>
     <style>
-        body { font-family: sans-serif; background: #f0f2f5; padding: 15px; }
-        .box { max-width: 600px; margin: auto; background: white; padding: 20px; border-radius: 15px; box-shadow: 0 5px 20px rgba(0,0,0,0.1); }
-        .card { border-left: 4px solid #27ae60; background: #f9f9f9; padding: 12px; margin-bottom: 10px; border-radius: 5px; }
-        .row { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px dashed #eee; font-size: 14px; }
-        .total-box { margin-top: 20px; padding: 20px; background: #fff1f0; border: 1px solid #ffa39e; border-radius: 8px; text-align: center; }
-        .total-amount { font-size: 32px; font-weight: bold; color: #cf1322; }
-        .btn { width: 100%; padding: 15px; background: #1890ff; color: white; border: none; border-radius: 8px; font-size: 16px; cursor: pointer; }
-        .btn:disabled { background: #bfbfbf; }
-        .nav-links { margin-top: 20px; display: flex; justify-content: space-between; }
-        .link { font-size: 13px; color: #666; text-decoration: none; padding: 5px 10px; border: 1px solid #ddd; border-radius: 4px; }
+        body { font-family: 'PingFang SC', sans-serif; background: #f4f7f9; padding: 20px; color: #333; }
+        .box { max-width: 600px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 8px 30px rgba(0,0,0,0.05); }
+        .card { border-left: 4px solid #2ecc71; background: #fafafa; padding: 15px; margin-bottom: 15px; border-radius: 6px; position: relative; }
+        .row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px dashed #eee; font-size: 14px; }
+        .grand-total { margin-top: 25px; padding: 20px; background: #fff5f5; border: 1px solid #ffccc7; border-radius: 10px; text-align: center; }
+        .amount-big { font-size: 32px; font-weight: bold; color: #ff4d4f; }
+        .btn-main { width: 100%; padding: 15px; background: #1890ff; color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; transition: 0.3s; }
+        .btn-main:disabled { background: #d9d9d9; cursor: not-allowed; }
+        .nav-bar { margin-top: 25px; display: flex; justify-content: space-around; border-top: 1px solid #eee; padding-top: 15px; }
+        .nav-link { font-size: 13px; color: #666; text-decoration: none; padding: 6px 12px; border: 1px solid #ddd; border-radius: 4px; }
+        #status { color: #1890ff; text-align: center; margin-top: 10px; font-size: 13px; }
     </style>
 </head>
 <body>
     <div class="box">
-        <h2 style="text-align:center;">🧾 小票解析汇总</h2>
+        <h2 style="text-align:center; margin-bottom:20px;">📜 小票解析汇总</h2>
         
         <form id="uploadForm" method="post" enctype="multipart/form-data">
-            <input type="file" id="fileInput" name="receipts[]" multiple required style="margin-bottom:15px; width:100%;">
-            <button type="submit" id="submitBtn" class="btn">开始识别并汇总</button>
-            <p id="status" style="display:none; color:#1890ff; text-align:center; font-size:13px; margin-top:10px;">处理中，请稍候...</p>
+            <input type="file" id="fileInput" name="receipts[]" multiple required style="margin-bottom:20px; width: 100%;">
+            <button type="submit" id="submitBtn" class="btn-main">开始解析并汇总</button>
+            <div id="status" style="display:none;">准备处理中...</div>
         </form>
 
-        <script>
-        document.getElementById('uploadForm').onsubmit = async function(e) {
-            e.preventDefault();
-            const btn = document.getElementById('submitBtn');
-            const status = document.getElementById('status');
-            const files = document.getElementById('fileInput').files;
-
-            btn.disabled = true;
-            status.style.display = "block";
-
-            const formData = new FormData();
-            for (let i = 0; i < files.length; i++) {
-                status.innerText = `压缩进度: ${i+1}/${files.length}...`;
-                const compressed = await compressImg(files[i]);
-                formData.append('receipts[]', compressed, files[i].name);
-            }
-
-            status.innerText = "正在请求 Azure API 解析，请勿刷新...";
-            fetch('', { method: 'POST', body: formData })
-            .then(r => r.text())
-            .then(html => {
-                const doc = new DOMParser().parseFromString(html, 'text/html');
-                document.body.innerHTML = doc.body.innerHTML;
-            })
-            .catch(err => {
-                alert("请求超时，请检查网络或减少单次上传数量");
-                btn.disabled = false;
-            });
-        };
-
-        function compressImg(file) {
-            return new Promise(res => {
-                const reader = new FileReader();
-                reader.readAsDataURL(file);
-                reader.onload = e => {
-                    const img = new Image();
-                    img.src = e.target.result;
-                    img.onload = () => {
-                        const canvas = document.createElement('canvas');
-                        const max = 1200;
-                        let w = img.width, h = img.height;
-                        if (w > max) { h = h * (max/w); w = max; }
-                        canvas.width = w; canvas.height = h;
-                        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-                        canvas.toBlob(b => res(new File([b], file.name, {type:'image/jpeg'})), 'image/jpeg', 0.8);
-                    };
-                };
-            });
-        }
-        </script>
-
         <?php if ($results): ?>
-            <div style="margin-top:20px;">
-                <h4 style="margin-bottom:10px; color:#555;">扫描明细：</h4>
+            <div style="margin-top:30px;">
+                <p style="font-weight:bold; color:#888;">扫描明细：</p>
                 <?php foreach ($results as $res): ?>
                     <div class="card">
-                        <div style="font-size:11px; color:#999; margin-bottom:5px;">📄 <?= htmlspecialchars($res['file']) ?></div>
-                        <?php foreach ($results[0]['items'] === [] && count($res['items']) === 0 ? [['name'=>'未识别到项目','price'=>0]] : $res['items'] as $it): ?>
-                            <div class="row">
-                                <span><?= htmlspecialchars($it['name']) ?></span>
-                                <span>¥<?= number_format($it['price']) ?></span>
-                            </div>
-                        <?php endforeach; ?>
+                        <small style="color:#aaa; font-size:11px;">📄 <?= htmlspecialchars($res['file']) ?></small>
+                        <?php if (empty($res['items'])): ?>
+                            <div class="row"><span style="color:#ccc;">未识别到有效商品</span></div>
+                        <?php else: ?>
+                            <?php foreach ($res['items'] as $it): ?>
+                                <div class="row">
+                                    <span><?= htmlspecialchars($it['name']) ?></span>
+                                    <span>¥<?= number_format($it['price']) ?></span>
+                                </div>
+                            <?php endforeach; ?>
+                        <?php endif; ?>
                     </div>
                 <?php endforeach; ?>
 
-                <div class="total-box">
-                    <div style="font-size:14px; color:#888;">所有已扫描小票总计 (累计)</div>
-                    <div class="total-amount">¥<?= number_format($totalAllAmount) ?></div>
+                <div class="grand-total">
+                    <div style="font-size:14px; color:#666;">所有已上传小票累计金额</div>
+                    <div class="amount-big">¥<?= number_format($totalAllAmount) ?></div>
                 </div>
             </div>
         <?php endif; ?>
 
-        <div class="nav-links">
-            <a href="?action=csv" class="link">📥 导出 CSV</a>
-            <a href="?action=log" class="link" target="_blank">📜 调试日志</a>
-            <a href="?action=clear" class="link" style="color:#ff4d4f;" onclick="return confirm('确认清空所有已扫描的数据吗？')">🗑️ 清空重置</a>
+        <div class="nav-bar">
+            <a href="?action=csv" class="nav-link">📥 导出 CSV</a>
+            <a href="?action=log" class="nav-link" target="_blank">📜 查看日志</a>
+            <a href="?action=clear" class="nav-link" style="color:#ff4d4f; border-color:#ffccc7;" onclick="return confirm('确定要清空所有记录吗？')">🗑️ 清空重置</a>
         </div>
     </div>
+
+    <script>
+    document.getElementById('uploadForm').onsubmit = async function(e) {
+        e.preventDefault();
+        const btn = document.getElementById('submitBtn');
+        const status = document.getElementById('status');
+        const files = document.getElementById('fileInput').files;
+        if (!files.length) return;
+
+        btn.disabled = true;
+        status.style.display = "block";
+
+        const formData = new FormData();
+        for (let i = 0; i < files.length; i++) {
+            status.innerText = `正在压缩图片 (${i+1}/${files.length})...`;
+            const compressed = await compressImg(files[i]);
+            formData.append('receipts[]', compressed, files[i].name);
+        }
+
+        status.innerText = "正在解析中，图片较多时请耐心等待...";
+        fetch('', { method: 'POST', body: formData })
+        .then(r => r.text())
+        .then(html => {
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(html, 'text/html');
+            document.body.innerHTML = doc.body.innerHTML;
+        })
+        .catch(err => {
+            alert("解析超时，请尝试单次上传更少的图片。");
+            btn.disabled = false;
+        });
+    };
+
+    function compressImg(file) {
+        return new Promise(resolve => {
+            const reader = new FileReader();
+            reader.readAsDataURL(file);
+            reader.onload = (e) => {
+                const img = new Image();
+                img.src = e.target.result;
+                img.onload = () => {
+                    const canvas = document.createElement('canvas');
+                    let w = img.width, h = img.height;
+                    if (w > 1200) { h = h * (1200/w); w = 1200; }
+                    canvas.width = w; canvas.height = h;
+                    canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+                    canvas.toBlob(blob => resolve(new File([blob], file.name, {type:'image/jpeg'})), 'image/jpeg', 0.8);
+                };
+            };
+        });
+    }
+    </script>
 </body>
 </html>
