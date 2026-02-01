@@ -1,6 +1,6 @@
 <?php
 /**
- * 🧾 小票解析系统 - 终极去重汇总版
+ * 🧾 小票解析系统 - 最终修复版 (解决商品漏查问题)
  */
 
 @set_time_limit(300);
@@ -68,48 +68,46 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
 
         for ($i = 0; $i < count($lines); $i++) {
             $text = trim($lines[$i]['text']);
-            $pureText = str_replace([' ', '　', '＊', '*', '◎', '√', '軽', '轻', '(', ')'], '', $text);
+            // 1. 彻底清除干扰符，包括日本小票常见的 ◎ 和 軽
+            $pureText = str_replace([' ', '　', '＊', '*', '◎', '√', '軽', '轻', '(', ')', '8%', '10%'], '', $text);
 
-            if (preg_match('/合計|合计|内消費税|消費税|対象|支払|残高|再発行/u', $pureText)) {
+            // 2. 只有遇到真正的结算关键词才停止
+            if (preg_match('/合計|合计|支払|残高|再発行/u', $pureText)) {
                 if (!empty($currentItems)) $stopFlag = true; 
                 continue; 
             }
             if ($stopFlag) continue;
 
+            // 3. 匹配金额 (兼容 ¥108轻 这种格式)
             if (preg_match('/[¥￥]([\d,]+)/u', $text, $matches)) {
                 $price = (int)str_replace(',', '', $matches[1]);
-                $nameInLine = trim(preg_replace('/[\.．…]+|[¥￥].*$/u', '', $text));
-                $cleanNameInLine = str_replace(['＊', '*', '轻', '軽', '◎', '(', ')', '.', '．', ' '], '', $nameInLine);
+                
+                // 提取名字部分：去掉金额及之后的所有字符，去掉两端杂质
+                $nameInLine = preg_replace('/[¥￥\s].*$/u', '', $text);
+                $cleanName = str_replace(['＊', '*', '◎', ' ', '√', '軽', '轻', '(', ')'], '', $nameInLine);
 
-                // 向上回溯找商品名
-                if (empty($cleanNameInLine) || preg_match('/^[¥￥\d,\s]+$/u', $cleanNameInLine)) {
-                    $foundName = "";
+                // 如果这一行没名字，向上找
+                if (mb_strlen($cleanName) < 2) {
                     for ($j = $i - 1; $j >= 0; $j--) {
-                        $prev = trim($lines[$j]['text']);
-                        $cleanPrev = str_replace(['＊', '*', '◎', ' ', '√', '軽', '轻'], '', $prev);
-                        if (mb_strlen($cleanPrev) >= 2 && !preg_match('/領|収|証|合|计|計|%|店|电话|電話|¥|￥/u', $cleanPrev)) {
-                            $foundName = $cleanPrev;
+                        $prev = str_replace(['＊', '*', '◎', ' ', '√', '軽', '轻'], '', trim($lines[$j]['text']));
+                        if (mb_strlen($prev) >= 2 && !preg_match('/Family|新宿|店|電話|番号|領収|証|¥|￥|合計/u', $prev)) {
+                            $cleanName = $prev;
                             break;
                         }
                     }
-                    $finalName = $foundName;
-                } else {
-                    $finalName = $cleanNameInLine;
                 }
 
-                // --- 重点：加入严格去重逻辑 ---
-                if (!empty($finalName) && !preg_match('/Family|新宿|電話|登録|領収|対象|消費税|合計|内訳/u', $finalName)) {
+                // 最终验证：只要名字不是黑名单里的词，就记录
+                if (mb_strlen($cleanName) >= 2 && !preg_match('/消費税|対象|内訳|登録/u', $cleanName)) {
                     $isDuplicate = false;
                     foreach ($currentItems as $item) {
-                        // 如果名字高度相似且金额一样，就判定为重复
-                        if ($item['name'] === $finalName && $item['price'] === $price) {
-                            $isDuplicate = true;
-                            break;
+                        if ($item['name'] === $cleanName && $item['price'] === $price) {
+                            $isDuplicate = true; break;
                         }
                     }
                     if (!$isDuplicate) {
-                        $currentItems[] = ['name' => $finalName, 'price' => $price];
-                        file_put_contents($logFile, "    -> ADDED: $finalName ($price)\n", FILE_APPEND);
+                        $currentItems[] = ['name' => $cleanName, 'price' => $price];
+                        file_put_contents($logFile, "    -> ADDED: $cleanName ($price)\n", FILE_APPEND);
                     }
                 }
             }
@@ -131,10 +129,10 @@ if ($results) {
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>小票解析系统</title>
+    <title>小票解析汇总版</title>
     <style>
         body { font-family: sans-serif; background: #f4f7f6; padding: 20px; }
-        .box { max-width: 650px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+        .box { max-width: 600px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
         .card { border-left: 5px solid #2ecc71; background: #fafafa; padding: 10px 15px; margin-top: 10px; border-radius: 4px; }
         .row { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px dashed #eee; font-size: 14px; }
         .grand-total-box { margin-top: 25px; padding: 20px; background: #fff5f5; border: 2px solid #e74c3c; border-radius: 10px; text-align: right; }
@@ -154,7 +152,7 @@ if ($results) {
         document.getElementById('uploadForm').onsubmit = async function(e) {
             e.preventDefault();
             const btn = document.getElementById('submitBtn');
-            btn.disabled = true; btn.innerText = "正在解析...";
+            btn.disabled = true; btn.innerText = "解析中...";
             const formData = new FormData();
             const files = document.getElementById('fileInput').files;
             for (let i = 0; i < files.length; i++) {
