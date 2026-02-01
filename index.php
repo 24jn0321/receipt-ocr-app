@@ -118,205 +118,308 @@ if ($results) {
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>小票智能解析系统</title>
-    <style>
-        :root {
-            --primary: #2563eb;
-            --bg: #f8fafc;
-            --card-bg: #ffffff;
-            --text-main: #1e293b;
-            --text-sub: #64748b;
-            --accent: #f43f5e;
-        }
-        body { 
-            font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif; 
-            background: var(--bg); 
-            color: var(--text-main);
-            margin: 0; padding: 20px; 
-            line-height: 1.6;
-        }
-        .container { max-width: 600px; margin: 0 auto; }
-        
-        /* 头部样式 */
-        header { text-align: center; margin-bottom: 30px; }
-        header h1 { font-size: 24px; margin-bottom: 5px; color: var(--primary); }
-        header p { font-size: 14px; color: var(--text-sub); }
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>小票解析</title>
 
-        /* 上传区域 */
-        .upload-box { 
-            background: var(--card-bg); 
-            padding: 30px; 
-            border-radius: 16px; 
-            box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);
-            text-align: center;
-            border: 2px dashed #e2e8f0;
-            transition: all 0.3s;
-        }
-        .upload-box:hover { border-color: var(--primary); }
-        
-        .file-input-wrapper { margin-bottom: 20px; }
-        input[type="file"] { font-size: 14px; color: var(--text-sub); }
+<style>
+:root {
+    --text-main: #0f172a;
+    --text-sub: #64748b;
+    --accent: #2563eb;
+    --bg: #f8fafc;
+    --card-bg: #ffffff;
+    --border: #e5e7eb;
+}
 
-        .btn-primary { 
-            width: 100%; padding: 12px; 
-            background: var(--primary); color: white; 
-            border: none; cursor: pointer; border-radius: 8px; 
-            font-weight: 600; font-size: 16px; 
-            transition: opacity 0.2s;
-        }
-        .btn-primary:hover { opacity: 0.9; }
-        .btn-primary:disabled { background: #cbd5e1; cursor: not-allowed; }
+* { box-sizing: border-box; }
 
-        /* 状态提示 */
-        #status { 
-            background: #eff6ff; color: var(--primary); 
-            padding: 10px; border-radius: 8px; 
-            margin-top: 15px; font-size: 13px; display: none; 
-        }
+body {
+    margin: 0;
+    padding: 40px 16px;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display",
+        "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text-main);
+    -webkit-font-smoothing: antialiased;
+}
 
-        /* 结果列表 */
-        .result-card { 
-            background: var(--card-bg); 
-            margin-top: 20px; border-radius: 12px; 
-            overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-        }
-        .card-header { 
-            background: #f1f5f9; padding: 10px 15px; 
-            font-size: 12px; color: var(--text-sub);
-            border-bottom: 1px solid #e2e8f0;
-            display: flex; justify-content: space-between;
-        }
-        .item-row { 
-            display: flex; justify-content: space-between; 
-            padding: 12px 15px; border-bottom: 1px solid #f8fafc;
-            font-size: 15px;
-        }
-        .item-row:last-child { border-bottom: none; }
-        .price { font-weight: 600; color: var(--text-main); }
+.app-container {
+    max-width: 520px;
+    margin: 0 auto;
+    background: var(--card-bg);
+    border-radius: 14px;
+    padding: 40px 32px 48px;
+    box-shadow:
+        0 10px 30px rgba(0,0,0,.06),
+        0 1px 3px rgba(0,0,0,.05);
+}
 
-        /* 合计区域 - 重点美化 */
-        .total-section { 
-            margin-top: 30px; 
-            background: linear-gradient(135deg, #1e293b 0%, #334155 100%);
-            color: white; padding: 25px; border-radius: 16px;
-            display: flex; justify-content: space-between; align-items: center;
-            box-shadow: 0 10px 15px -3px rgba(0,0,0,0.2);
-        }
-        .total-label { font-size: 16px; opacity: 0.8; font-weight: 300; }
-        .total-amount { font-size: 32px; font-weight: 700; letter-spacing: -1px; }
-        .total-amount span { font-size: 18px; margin-right: 4px; }
+/* Header */
+header {
+    margin-bottom: 48px;
+}
+header h1 {
+    font-size: 30px;
+    font-weight: 700;
+    margin: 0;
+}
+header p {
+    margin-top: 6px;
+    font-size: 14px;
+    color: var(--text-sub);
+    letter-spacing: .2px;
+}
 
-        /* 底部动作 */
-        .footer-actions { 
-            margin-top: 25px; display: flex; gap: 10px; justify-content: center; 
-        }
-        .btn-outline { 
-            text-decoration: none; font-size: 13px; 
-            color: var(--text-sub); border: 1px solid #e2e8f0; 
-            padding: 8px 16px; border-radius: 6px; transition: all 0.2s;
-        }
-        .btn-outline:hover { background: white; border-color: var(--text-sub); color: var(--text-main); }
-    </style>
+/* Upload */
+.upload-area {
+    margin-bottom: 20px;
+}
+
+.upload-box {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 20px;
+    border: 1.5px dashed var(--border);
+    border-radius: 12px;
+    cursor: pointer;
+    transition: .25s;
+}
+.upload-box:hover {
+    border-color: var(--accent);
+    background: #f1f5ff;
+}
+
+.upload-icon {
+    font-size: 28px;
+}
+
+.upload-text strong {
+    display: block;
+    font-size: 15px;
+}
+.upload-text span {
+    display: block;
+    margin-top: 2px;
+    font-size: 12px;
+    color: var(--text-sub);
+}
+
+.btn-submit {
+    margin-top: 22px;
+    width: 100%;
+    padding: 16px;
+    background: linear-gradient(180deg, #111827, #020617);
+    color: #fff;
+    border: none;
+    border-radius: 10px;
+    font-size: 15px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: .2s;
+}
+.btn-submit:hover { opacity: .9; transform: translateY(-1px); }
+.btn-submit:disabled {
+    background: #e5e7eb;
+    color: #94a3b8;
+    cursor: not-allowed;
+    transform: none;
+}
+
+#status {
+    margin-top: 14px;
+    font-size: 13px;
+    text-align: center;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+}
+
+/* Results */
+.receipt-group {
+    margin-top: 56px;
+}
+
+.file-label {
+    display: block;
+    margin-top: 36px;
+    margin-bottom: 10px;
+    font-size: 11px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--text-sub);
+    border-bottom: 1px solid #f1f5f9;
+    padding-bottom: 4px;
+}
+
+.item-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 14px 0;
+    border-bottom: 1px solid #fafafa;
+}
+
+.item-name {
+    flex: 1;
+    padding-right: 20px;
+    font-size: 15px;
+}
+
+.item-price {
+    font-size: 15px;
+    font-weight: 500;
+    font-family: "SF Mono", Consolas, monospace;
+}
+
+/* Summary */
+.summary-box {
+    margin-top: 72px;
+    padding-top: 28px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    background: linear-gradient(180deg, #fff, #f8fafc);
+}
+
+.total-title {
+    font-size: 15px;
+    color: var(--text-sub);
+}
+
+.total-amount {
+    font-size: 46px;
+    font-weight: 700;
+    letter-spacing: -1px;
+}
+.total-amount span {
+    font-size: 20px;
+    margin-right: 4px;
+    font-weight: 400;
+}
+
+/* Footer */
+.footer-links {
+    margin-top: 48px;
+    display: flex;
+    justify-content: center;
+    gap: 24px;
+}
+
+.link {
+    font-size: 13px;
+    color: var(--text-sub);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: .2s;
+}
+.link:hover {
+    color: var(--text-main);
+    border-bottom-color: var(--text-main);
+}
+</style>
 </head>
+
 <body>
-    <div class="container">
-        <header>
-            <h1>🧾 小票识别汇总</h1>
-            <p>智能提取项目名称与金额 (支持多图上传)</p>
-        </header>
-        
-        <div class="upload-box">
-            <form id="uploadForm" method="post" enctype="multipart/form-data">
-                <div class="file-input-wrapper">
-                    <input type="file" id="fileInput" name="receipts[]" multiple required>
-                </div>
-                <button type="submit" id="submitBtn" class="btn-primary">开始解析</button>
-                <div id="status">📸 正在压缩图片并请求 API，请稍候...</div>
-            </form>
+<div class="app-container">
+
+<header>
+    <h1>小票解析</h1>
+    <p>Intelligence in simplicity.</p>
+</header>
+
+<div class="upload-area">
+<form id="uploadForm" method="post" enctype="multipart/form-data">
+    <label class="upload-box">
+        <input type="file" id="fileInput" name="receipts[]" multiple required hidden>
+        <div class="upload-icon">📄</div>
+        <div class="upload-text">
+            <strong>选择小票图片</strong>
+            <span>支持多张，自动压缩与识别</span>
         </div>
+    </label>
 
-        <?php if ($results): ?>
-            <div class="results-container">
-                <?php foreach ($results as $res): ?>
-                    <div class="result-card">
-                        <div class="card-header">
-                            <span>📄 <?= htmlspecialchars($res['file']) ?></span>
-                            <span><?= count($res['items']) ?> 项</span>
-                        </div>
-                        <?php foreach ($res['items'] as $it): ?>
-                            <div class="item-row">
-                                <span class="name"><?= htmlspecialchars($it['name']) ?></span>
-                                <span class="price">¥<?= number_format($it['price']) ?></span>
-                            </div>
-                        <?php endforeach; ?>
-                    </div>
-                <?php endforeach; ?>
+    <button type="submit" id="submitBtn" class="btn-submit">开始解析</button>
+    <div id="status"></div>
+</form>
+</div>
 
-                <div class="total-section">
-                    <div class="total-label">合计 (Total)</div>
-                    <div class="total-amount"><span>¥</span><?= number_format($totalAllAmount) ?></div>
-                </div>
-            </div>
-        <?php endif; ?>
-
-        <div class="footer-actions">
-            <a href="?action=csv" class="btn-outline">📥 下载数据 (CSV)</a>
-            <a href="?action=log" class="btn-outline">📜 调试日志</a>
+<?php if ($results): ?>
+<div class="receipt-group">
+<?php foreach ($results as $res): ?>
+    <span class="file-label"><?= htmlspecialchars($res['file']) ?></span>
+    <?php foreach ($res['items'] as $it): ?>
+        <div class="item-row">
+            <span class="item-name"><?= htmlspecialchars($it['name']) ?></span>
+            <span class="item-price">¥<?= number_format($it['price']) ?></span>
         </div>
-    </div>
+    <?php endforeach; ?>
+<?php endforeach; ?>
 
-    <script>
-    // 保持压缩和上传逻辑
-    document.getElementById('uploadForm').onsubmit = async function(e) {
-        e.preventDefault();
-        const btn = document.getElementById('submitBtn');
-        const status = document.getElementById('status');
-        const files = document.getElementById('fileInput').files;
-        if (files.length === 0) return;
+<div class="summary-box">
+    <div class="total-title">合计</div>
+    <div class="total-amount"><span>¥</span><?= number_format($totalAllAmount) ?></div>
+</div>
+</div>
+<?php endif; ?>
 
-        btn.disabled = true;
-        status.style.display = "block";
+<div class="footer-links">
+    <a href="?action=csv" class="link">CSV 导出</a>
+    <a href="?action=log" class="link">运行日志</a>
+</div>
 
-        const formData = new FormData();
-        for (let i = 0; i < files.length; i++) {
-            status.innerText = `正在压缩处理第 ${i+1}/${files.length} 张图片...`;
-            const compressedFile = await compressImage(files[i]);
-            formData.append('receipts[]', compressedFile, files[i].name);
-        }
+</div>
 
-        status.innerText = "🔍 云端识别中，请稍后 (每张约需2秒)...";
-        fetch('', { method: 'POST', body: formData })
+<script>
+document.getElementById('uploadForm').onsubmit = async function(e) {
+    e.preventDefault();
+    const btn = document.getElementById('submitBtn');
+    const status = document.getElementById('status');
+    const files = document.getElementById('fileInput').files;
+    if (!files.length) return;
+
+    btn.disabled = true;
+    status.innerText = "处理中...";
+
+    const formData = new FormData();
+    for (let i = 0; i < files.length; i++) {
+        status.innerText = `压缩图像 (${i+1}/${files.length})`;
+        const f = await compressImage(files[i]);
+        formData.append('receipts[]', f, files[i].name);
+    }
+
+    status.innerText = "识别请求中...";
+    fetch('', { method: 'POST', body: formData })
         .then(r => r.text())
         .then(html => {
             const doc = new DOMParser().parseFromString(html, 'text/html');
             document.body.innerHTML = doc.body.innerHTML;
-        })
-        .catch(err => {
-            alert("网络请求失败，请检查网络或减少单次上传数量。");
-            btn.disabled = false;
-            status.style.display = "none";
         });
-    };
+};
 
-    function compressImage(file) {
-        return new Promise((resolve) => {
-            const reader = new FileReader();
-            reader.readAsDataURL(file);
-            reader.onload = (e) => {
-                const img = new Image();
-                img.src = e.target.result;
-                img.onload = () => {
-                    const canvas = document.createElement('canvas');
-                    let w = img.width; if (w > 1200) w = 1200;
-                    canvas.width = w; canvas.height = img.height * (w / img.width);
-                    canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
-                    canvas.toBlob(b => resolve(new File([b], file.name, {type:'image/jpeg'})), 'image/jpeg', 0.8);
-                };
+function compressImage(file) {
+    return new Promise(resolve => {
+        const reader = new FileReader();
+        reader.readAsDataURL(file);
+        reader.onload = e => {
+            const img = new Image();
+            img.src = e.target.result;
+            img.onload = () => {
+                const canvas = document.createElement('canvas');
+                const w = 1200;
+                canvas.width = w;
+                canvas.height = img.height * (w / img.width);
+                canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+                canvas.toBlob(b =>
+                    resolve(new File([b], file.name, { type: 'image/jpeg' })),
+                    'image/jpeg', 0.85
+                );
             };
-        });
-    }
-    </script>
+        };
+    });
+}
+</script>
 </body>
 </html>
+
