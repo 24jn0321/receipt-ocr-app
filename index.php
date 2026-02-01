@@ -1,6 +1,6 @@
 <?php
 /**
- * 🧾 小票解析系统 - 多图并发处理修复版
+ * 🧾 小票解析系统 - 最终集成版 (支持多图 + 自动压缩 + 算法回溯)
  */
 
 $endpoint = "https://24jn0321.cognitiveservices.azure.com/"; 
@@ -31,17 +31,14 @@ if (isset($_GET['action'])) {
     if ($action == 'log' && file_exists($logFile)) {
         header('Content-Type: text/plain; charset=utf-8');
         header('Content-Disposition: attachment; filename=ocr_debug.log');
-        readfile($logFile);
-        exit;
+        readfile($logFile); exit;
     }
 }
 
 // --- B. OCR 解析逻辑 ---
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
-    // 每次上传清空旧日志
     file_put_contents($logFile, "--- OCR DEBUG LOG " . date('Y-m-d H:i:s') . " ---\n");
     
-    // 关键：循环处理所有上传的文件
     foreach ($_FILES['receipts']['tmp_name'] as $key => $tmpName) {
         if (empty($tmpName)) continue;
         
@@ -66,7 +63,6 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
         
         file_put_contents($logFile, "\n[FILE]: $fileName\n", FILE_APPEND);
 
-        // --- 核心识别逻辑循环 ---
         for ($i = 0; $i < count($lines); $i++) {
             $text = trim($lines[$i]['text']);
             file_put_contents($logFile, "  RAW: $text\n", FILE_APPEND);
@@ -79,13 +75,12 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
             }
             if ($stopFlag) continue;
 
-            // 匹配金额行
             if (preg_match('/[¥￥]([\d,]+)/u', $text, $matches)) {
                 $price = (int)str_replace(',', '', $matches[1]);
                 $nameInLine = trim(preg_replace('/[\.．…]+|[¥￥].*$/u', '', $text));
                 $cleanNameInLine = str_replace(['＊', '*', '轻', '軽', '◎', '(', ')', '.', '．', ' '], '', $nameInLine);
 
-                // --- 找回你的核心代码：如果本行没有名字，向上寻找 ---
+                // --- 核心：名称为空或纯数字时，向上寻找商品名 ---
                 if (empty($cleanNameInLine) || preg_match('/^[¥￥\d,\s]+$/u', $cleanNameInLine)) {
                     $foundName = "";
                     for ($j = $i - 1; $j >= 0; $j--) {
@@ -102,14 +97,12 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
                 }
 
                 if (!empty($finalName) && !preg_match('/Family|新宿|電話|登録|領収|対象|消費税|合計|内訳/u', $finalName)) {
-                    // 去重检查
                     $isDuplicate = false;
                     foreach ($currentItems as $item) {
                         if ($item['name'] === $finalName && $item['price'] === $price) {
                             $isDuplicate = true; break;
                         }
                     }
-
                     if (!$isDuplicate) {
                         $currentItems[] = ['name' => $finalName, 'price' => $price];
                         $sumAmount += $price;
@@ -118,14 +111,11 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
                 }
             }
         }
-        // 将单张小票结果存入总结果集
         $results[] = ['file' => $fileName, 'items' => $currentItems, 'total' => $sumAmount];
     }
-    // 处理完所有图片后，统一保存
     file_put_contents($storageFile, json_encode($results, JSON_UNESCAPED_UNICODE));
 }
 ?>
-
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -140,97 +130,75 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
         .btn { width: 100%; padding: 12px; background: #3498db; color: white; border: none; cursor: pointer; border-radius: 6px; font-weight: bold; }
         .actions { margin-top: 30px; display: flex; justify-content: center; gap: 20px; border-top: 1px solid #eee; padding-top: 20px; }
         .link-btn { text-decoration: none; font-size: 14px; font-weight: bold; color: #3498db; border: 1px solid #3498db; padding: 8px 15px; border-radius: 5px; }
-        .link-btn:hover { background: #3498db; color: white; }
     </style>
 </head>
 <body>
     <div class="box">
         <h2 style="text-align:center;">🧾 小票解析 (多图稳定版)</h2>
-       <form id="uploadForm" method="post" enctype="multipart/form-data">
-    <input type="file" id="fileInput" name="receipts[]" multiple required style="margin-bottom:15px;"><br>
-    <button type="submit" id="submitBtn" class="btn">执行解析</button>
-    <p id="status" style="display:none; color:#3498db; font-size:14px; margin-top:10px;">正在压缩图片并解析，请稍候...</p>
-</form>
+        
+        <form id="uploadForm" method="post" enctype="multipart/form-data">
+            <input type="file" id="fileInput" name="receipts[]" multiple required style="margin-bottom:15px;"><br>
+            <button type="submit" id="submitBtn" class="btn">执行解析</button>
+            <p id="status" style="display:none; color:#3498db; font-size:14px; margin-top:10px;">正在压缩并解析，请稍候...</p>
+        </form>
 
-<script>
-document.getElementById('uploadForm').onsubmit = async function(e) {
-    e.preventDefault();
-    const btn = document.getElementById('submitBtn');
-    const status = document.getElementById('status');
-    const files = document.getElementById('fileInput').files;
-    
-    if (files.length === 0) return;
+        <script>
+        document.getElementById('uploadForm').onsubmit = async function(e) {
+            e.preventDefault();
+            const btn = document.getElementById('submitBtn');
+            const status = document.getElementById('status');
+            const files = document.getElementById('fileInput').files;
+            if (files.length === 0) return;
 
-    btn.disabled = true;
-    btn.innerText = "处理中...";
-    status.style.display = "block";
+            btn.disabled = true;
+            btn.innerText = "处理中...";
+            status.style.display = "block";
 
-    const formData = new FormData();
+            const formData = new FormData();
+            for (let i = 0; i < files.length; i++) {
+                const compressedFile = await compressImage(files[i]);
+                formData.append('receipts[]', compressedFile, files[i].name);
+            }
 
-    // 逐个压缩文件
-    for (let i = 0; i < files.length; i++) {
-        const compressedFile = await compressImage(files[i]);
-        formData.append('receipts[]', compressedFile, files[i].name);
-    }
-
-    // 使用 fetch 发送压缩后的数据
-    fetch('', {
-        method: 'POST',
-        body: formData
-    }).then(response => response.text())
-      .then(html => {
-          // 刷新页面显示结果
-          document.open();
-          document.write(html);
-          document.close();
-      }).catch(err => {
-          alert("上传失败: " + err);
-          btn.disabled = false;
-          btn.innerText = "执行解析";
-      });
-};
-
-// 核心：图片压缩函数
-function compressImage(file) {
-    return new Promise((resolve) => {
-        const reader = new FileReader();
-        reader.readAsDataURL(file);
-        reader.onload = function(event) {
-            const img = new Image();
-            img.src = event.target.result;
-            img.onload = function() {
-                const canvas = document.createElement('canvas');
-                let width = img.width;
-                let height = img.height;
-
-                // 如果图片太大，等比例缩小尺寸
-                const MAX_WIDTH = 1200; 
-                if (width > MAX_WIDTH) {
-                    height *= MAX_WIDTH / width;
-                    width = MAX_WIDTH;
-                }
-
-                canvas.width = width;
-                canvas.height = height;
-                const ctx = canvas.getContext('2d');
-                ctx.drawImage(img, 0, 0, width, height);
-                
-                // 关键：将质量设为 0.7 (70%)，体积会剧减 80% 以上
-                canvas.toBlob((blob) => {
-                    resolve(new File([blob], file.name, { type: 'image/jpeg' }));
-                }, 'image/jpeg', 0.7);
-            };
+            fetch('', { method: 'POST', body: formData })
+            .then(r => r.text())
+            .then(html => {
+                const doc = new DOMParser().parseFromString(html, 'text/html');
+                document.body.innerHTML = doc.body.innerHTML;
+            })
+            .catch(err => alert("上传失败: " + err))
+            .finally(() => {
+                btn.disabled = false;
+                status.style.display = "none";
+            });
         };
-    });
-}
-</script>
+
+        function compressImage(file) {
+            return new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.readAsDataURL(file);
+                reader.onload = (e) => {
+                    const img = new Image();
+                    img.src = e.target.result;
+                    img.onload = () => {
+                        const canvas = document.createElement('canvas');
+                        let w = img.width, h = img.height;
+                        if (w > 1200) { h *= 1200 / w; w = 1200; }
+                        canvas.width = w; canvas.height = h;
+                        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+                        canvas.toBlob(b => resolve(new File([b], file.name, {type:'image/jpeg'})), 'image/jpeg', 0.7);
+                    };
+                };
+            });
+        }
+        </script>
 
         <?php if ($results): ?>
             <?php foreach ($results as $res): ?>
                 <div class="card">
                     <small style="color:#999">📄 文件: <?= htmlspecialchars($res['file']) ?></small>
                     <?php if (empty($res['items'])): ?>
-                        <p style="color:#999; font-size:14px;">未检测到有效商品信息。</p>
+                        <p style="color:#999; font-size:14px;">未检测到商品信息。</p>
                     <?php else: ?>
                         <?php foreach ($res['items'] as $it): ?>
                             <div class="row">
@@ -246,9 +214,8 @@ function compressImage(file) {
 
         <div class="actions">
             <a href="?action=csv" class="link-btn">📥 下载 CSV 报表</a>
-            <a href="?action=log" class="link-btn" style="color:#7f8c8d; border-color:#7f8c8d;">📜 下载验证日志</a>
+            <a href="?action=log" class="link-btn" style="color:#7f8c8d; border-color:#7f8c8d;">📜 查看日志</a>
         </div>
     </div>
 </body>
 </html>
-
