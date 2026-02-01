@@ -1,7 +1,7 @@
 <?php
 /**
- * 🧾 小票解析系统 - Azure SQL データベース統合版
- * 修改说明：打开页面时不显示历史记录，仅在上传后显示本次解析结果。
+ * 🧾 小票解析系统 - Azure SQL 数据库整合版
+ * 功能：OCR识别、Azure SQL 存储、CSV 导出、运行日志下载
  */
 
 // --- 1. 配置与環境設置 ---
@@ -27,11 +27,11 @@ if ($conn === false) {
     die("<pre>" . print_r(sqlsrv_errors(), true) . "</pre>");
 }
 
-// --- 3. 动作处理 (CSV/清空) ---
+// --- 3. 动作处理 (CSV/清空/日志下载) ---
 if (isset($_GET['action'])) {
     $action = $_GET['action'];
     
-    // CSV输出 (导出完整历史记录)
+    // 导出 CSV
     if ($action == 'csv') {
         header('Content-Type: text/csv; charset=utf-8');
         header('Content-Disposition: attachment; filename=receipt_export_'.date('Ymd').'.csv');
@@ -43,19 +43,45 @@ if (isset($_GET['action'])) {
                 FROM receipts r JOIN receipt_items i ON r.id = i.receipt_id";
         $stmt = sqlsrv_query($conn, $sql);
         while ($row = sqlsrv_fetch_array($stmt, SQLSRV_FETCH_ASSOC)) {
-            fputcsv($output, [$row['file_name'], $row['item_name'], $row['price'], $row['processed_at']->format('Y-m-d H:i:s')]);
+            fputcsv($output, [
+                $row['file_name'], 
+                $row['item_name'], 
+                $row['price'], 
+                $row['processed_at'] ? $row['processed_at']->format('Y-m-d H:i:s') : ''
+            ]);
         }
         fclose($output); exit;
     }
 
+    // 下载日志文件
+    if ($action == 'download_log') {
+        if (file_exists($logFile)) {
+            header('Content-Description: File Transfer');
+            header('Content-Type: text/plain');
+            header('Content-Disposition: attachment; filename="ocr_debug_'.date('Ymd_His').'.log"');
+            header('Expires: 0');
+            header('Cache-Control: must-revalidate');
+            header('Pragma: public');
+            header('Content-Length: ' . filesize($logFile));
+            readfile($logFile);
+            exit;
+        } else {
+            echo "<script>alert('日志文件尚不存在'); window.location.href='index.php';</script>";
+            exit;
+        }
+    }
+
+    // 清空数据库
     if ($action == 'clear') {
         sqlsrv_query($conn, "DELETE FROM receipts");
+        // 如果想顺便清空日志文件，可以取消下面这行的注释
+        // if (file_exists($logFile)) unlink($logFile); 
         header("Location: " . strtok($_SERVER["REQUEST_URI"], '?')); exit;
     }
 }
 
 // --- 4. OCR 核心解析逻辑 ---
-$receiptId = null; // 用于存储最后一张解析的小票ID
+$receiptId = null; 
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
     file_put_contents($logFile, "\n[" . date('Y-m-d H:i:s') . "] --- 开始識別任務 ---\n", FILE_APPEND);
     
@@ -80,7 +106,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
         curl_close($ch);
 
         if ($httpCode !== 200) {
-            file_put_contents($logFile, "  [ERROR] $fileName 请求失敗: HTTP $httpCode\n", FILE_APPEND);
+            file_put_contents($logFile, "  [ERROR] $fileName 请求失敗: HTTP $httpCode - Response: $response\n", FILE_APPEND);
             continue; 
         }
 
@@ -133,12 +159,11 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
             }
         }
 
-        // --- データベースへの保存 ---
         if (!empty($currentItems)) {
             $sqlR = "INSERT INTO receipts (file_name) OUTPUT INSERTED.id VALUES (?)";
             $stmtR = sqlsrv_query($conn, $sqlR, array($fileName));
             if ($stmtR && sqlsrv_fetch($stmtR)) {
-                $receiptId = sqlsrv_get_field($stmtR, 0); // 记录下当前处理的ID
+                $receiptId = sqlsrv_get_field($stmtR, 0); 
                 foreach ($currentItems as $it) {
                     $sqlI = "INSERT INTO receipt_items (receipt_id, item_name, price) VALUES (?, ?, ?)";
                     sqlsrv_query($conn, $sqlI, array($receiptId, $it['name'], $it['price']));
@@ -149,12 +174,11 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
     }
 }
 
-// --- 5. 表示用データの読み取り (仅在 POST 后显示本次结果) ---
+// --- 5. 表示用データの読み取り ---
 $results = [];
 $totalAllAmount = 0;
 
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($receiptId)) {
-    // 仅查询最后一次插入的 ID 相关的数据，不查全表
     $sqlMain = "SELECT id, file_name FROM receipts WHERE id = ?";
     $resMain = sqlsrv_query($conn, $sqlMain, array($receiptId));
     
@@ -186,8 +210,9 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($receiptId)) {
         .grand-total { margin-top: 25px; padding: 20px; background: #fff5f5; border: 1px solid #ffccc7; border-radius: 10px; text-align: center; }
         .amount-big { font-size: 32px; font-weight: bold; color: #ff4d4f; }
         .btn-main { width: 100%; padding: 15px; background: #1890ff; color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; }
-        .nav-bar { margin-top: 25px; display: flex; justify-content: space-around; border-top: 1px solid #eee; padding-top: 15px; }
-        .nav-link { font-size: 13px; color: #666; text-decoration: none; padding: 6px 12px; border: 1px solid #ddd; border-radius: 4px; }
+        .nav-bar { margin-top: 25px; display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; border-top: 1px solid #eee; padding-top: 15px; }
+        .nav-link { font-size: 12px; color: #666; text-decoration: none; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; background: #fff; }
+        .nav-link:hover { background: #f0f0f0; }
         #status { color: #1890ff; text-align: center; margin-top: 10px; font-size: 13px; }
     </style>
 </head>
@@ -224,7 +249,8 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($receiptId)) {
         <?php endif; ?>
 
         <div class="nav-bar">
-            <a href="?action=csv" class="nav-link">📥 导出历史记录 (CSV)</a>
+            <a href="?action=csv" class="nav-link">📥 导出历史 (CSV)</a>
+            <a href="?action=download_log" class="nav-link">📝 下载运行日志</a>
             <a href="?action=clear" class="nav-link" style="color:#ff4d4f;" onclick="return confirm('确定清空数据库中的所有历史记录吗？')">🗑️ 清空数据库</a>
         </div>
     </div>
