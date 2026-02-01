@@ -1,10 +1,7 @@
 <?php
 /**
- * 🧾 小票解析系统 - 最终修复版
- * 修改说明：
- * 1. 保留名字前的 ◎ 符号。
- * 2. 增加“彻底重置数据库”功能（重置 ID 为 1）。
- * 3. 修复外键约束导致的无法重置问题。
+ * 🧾 小票解析系统 - 页面重置版
+ * 修改说明：移除数据库删除功能，改为“清空页面显示”。
  */
 
 // --- 1. 配置与環境設置 ---
@@ -32,31 +29,31 @@ if ($conn === false) {
 if (isset($_GET['action'])) {
     $action = $_GET['action'];
     
+    // 导出 CSV 功能保留
     if ($action == 'csv') {
         header('Content-Type: text/csv; charset=utf-8');
         header('Content-Disposition: attachment; filename=receipt_export_'.date('Ymd').'.csv');
         echo "\xEF\xBB\xBF"; 
         $output = fopen('php://output', 'w');
-        fputcsv($output, ['ID', '文件名', '项目', '金额', '日期']);
-        $sql = "SELECT r.id, r.file_name, r.processed_at, i.item_name, i.price FROM receipts r JOIN receipt_items i ON r.id = i.receipt_id";
+        fputcsv($output, ['文件名', '项目', '金额', '日期']);
+        $sql = "SELECT r.file_name, r.processed_at, i.item_name, i.price FROM receipts r JOIN receipt_items i ON r.id = i.receipt_id";
         $stmt = sqlsrv_query($conn, $sql);
         while ($row = sqlsrv_fetch_array($stmt, SQLSRV_FETCH_ASSOC)) {
-            fputcsv($output, [$row['id'], $row['file_name'], $row['item_name'], $row['price'], $row['processed_at']->format('Y-m-d H:i:s')]);
+            fputcsv($output, [$row['file_name'], $row['item_name'], $row['price'], $row['processed_at']->format('Y-m-d H:i:s')]);
         }
         fclose($output); exit;
     }
 
-    if ($action == 'clear_view') {
-        header("Location: " . strtok($_SERVER["PHP_SELF"], '?')); 
-        exit;
+    if ($action == 'download_log') {
+        if (file_exists($logFile)) {
+            header('Content-Type: text/plain');
+            header('Content-Disposition: attachment; filename="ocr.log"');
+            readfile($logFile); exit;
+        }
     }
 
-    // --- 彻底清空并重置 ID 为 1 ---
-    if ($action == 'db_reset') {
-        sqlsrv_query($conn, "DELETE FROM receipt_items");
-        sqlsrv_query($conn, "DELETE FROM receipts");
-        sqlsrv_query($conn, "DBCC CHECKIDENT ('receipts', RESEED, 0)");
-        sqlsrv_query($conn, "DBCC CHECKIDENT ('receipt_items', RESEED, 0)");
+    // --- 修改点：这里不再执行 DELETE 语句，只是刷新页面清除 POST 状态 ---
+    if ($action == 'clear_view') {
         header("Location: " . strtok($_SERVER["PHP_SELF"], '?')); 
         exit;
     }
@@ -65,6 +62,8 @@ if (isset($_GET['action'])) {
 // --- 4. OCR 核心解析逻辑 ---
 $processedIds = []; 
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
+    file_put_contents($logFile, "\n[" . date('Y-m-d H:i:s') . "] --- 开始識別任務 ---\n", FILE_APPEND);
+    
     foreach ($_FILES['receipts']['tmp_name'] as $key => $tmpName) {
         if (empty($tmpName)) continue;
         if ($key > 0) sleep(1);
@@ -80,8 +79,15 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
         curl_setopt($ch, CURLOPT_TIMEOUT, 60);
+
         $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
+
+        if ($httpCode !== 200) {
+            file_put_contents($logFile, "  [ERROR] $fileName 请求失敗: HTTP $httpCode\n", FILE_APPEND);
+            continue; 
+        }
 
         $data = json_decode($response, true);
         $lines = $data['readResult']['blocks'][0]['lines'] ?? [];
@@ -90,8 +96,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
 
         for ($i = 0; $i < count($lines); $i++) {
             $text = trim($lines[$i]['text']);
-            // 【修改点】此处不再删除 ◎，以便进行行匹配
-            $pureText = str_replace([' ', '　', '＊', '*', '√', '軽', '轻', '(', ')', '8%', '10%'], '', $text);
+            $pureText = str_replace([' ', '　', '＊', '*', '√', '軽', '轻', '(', ')', '8%', '10%', '◎'], '', $text);
 
             if (preg_match('/合計|合计|内消費税|消費税|対象|支払|残高|再発行/u', $pureText)) {
                 if (!empty($currentItems)) $stopFlag = true; 
@@ -102,14 +107,13 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
             if (preg_match('/[¥￥]([\d,]+)/u', $text, $matches)) {
                 $price = (int)str_replace(',', '', $matches[1]);
                 $nameInLine = trim(preg_replace('/[\.．…]+|[¥￥].*$/u', '', $text));
-                // 【修改点】cleanNameInLine 不再剔除 ◎，保留在商品名中
-                $cleanNameInLine = str_replace(['＊', '*', '轻', '軽', '(', ')', '.', '．', ' '], '', $nameInLine);
+                $cleanNameInLine = str_replace(['＊', '*', '轻', '軽', '(', ')', '.', '．', ' ', '◎'], '', $nameInLine);
 
-                if (mb_strlen($cleanNameInLine) < 2 || preg_match('/^[¥￥\d,\s◎]+$/u', $cleanNameInLine)) {
+                if (mb_strlen($cleanNameInLine) < 2 || preg_match('/^[¥￥\d,\s]+$/u', $cleanNameInLine)) {
                     $foundName = "";
                     for ($j = $i - 1; $j >= 0; $j--) {
                         $prev = trim($lines[$j]['text']);
-                        $cleanPrev = str_replace(['＊', '*', ' ', '√', '軽', '轻'], '', $prev); // 这里也不删 ◎
+                        $cleanPrev = str_replace(['＊', '*', ' ', '√', '軽', '轻', '◎'], '', $prev);
                         if (mb_strlen($cleanPrev) >= 2 && !preg_match('/領|収|証|合|计|計|%|店|电话|電話|¥|￥/u', $cleanPrev)) {
                             $foundName = $cleanPrev; break;
                         }
@@ -120,7 +124,15 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
                 }
 
                 if (!empty($finalName) && !preg_match('/Family|新宿|電話|登録|領収|対象|消費税|合計|内訳/u', $finalName)) {
-                    $currentItems[] = ['name' => $finalName, 'price' => $price];
+                    $isDuplicate = false;
+                    foreach ($currentItems as $existing) {
+                        if ($existing['name'] === $finalName && $existing['price'] === $price) {
+                            $isDuplicate = true; break;
+                        }
+                    }
+                    if (!$isDuplicate) {
+                        $currentItems[] = ['name' => $finalName, 'price' => $price];
+                    }
                 }
             }
         }
@@ -140,20 +152,25 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
     }
 }
 
-// --- 5. 获取结果显示 ---
+// --- 5. 表示用データの読み取り ---
 $results = [];
 $totalAllAmount = 0;
-if (!empty($processedIds)) {
+
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && !empty($processedIds)) {
     $idList = implode(',', $processedIds);
-    $resMain = sqlsrv_query($conn, "SELECT id, file_name FROM receipts WHERE id IN ($idList)");
-    while ($row = sqlsrv_fetch_array($resMain, SQLSRV_FETCH_ASSOC)) {
-        $items = [];
-        $resSub = sqlsrv_query($conn, "SELECT item_name as name, price FROM receipt_items WHERE receipt_id = ?", array($row['id']));
-        while ($it = sqlsrv_fetch_array($resSub, SQLSRV_FETCH_ASSOC)) {
-            $items[] = $it;
-            $totalAllAmount += $it['price'];
+    $sqlMain = "SELECT id, file_name FROM receipts WHERE id IN ($idList)";
+    $resMain = sqlsrv_query($conn, $sqlMain);
+    if ($resMain) {
+        while ($row = sqlsrv_fetch_array($resMain, SQLSRV_FETCH_ASSOC)) {
+            $items = [];
+            $sqlSub = "SELECT item_name as name, price FROM receipt_items WHERE receipt_id = ? ORDER BY id ASC";
+            $resSub = sqlsrv_query($conn, $sqlSub, array($row['id']));
+            while ($it = sqlsrv_fetch_array($resSub, SQLSRV_FETCH_ASSOC)) {
+                $items[] = $it;
+                $totalAllAmount += $it['price'];
+            }
+            $results[] = ['file' => $row['file_name'], 'items' => $items];
         }
-        $results[] = ['id' => $row['id'], 'file' => $row['file_name'], 'items' => $items];
     }
 }
 ?>
@@ -162,32 +179,35 @@ if (!empty($processedIds)) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>小票解析系统</title>
+    <title>Azure SQL 小票解析</title>
     <style>
-        body { font-family: 'PingFang SC', sans-serif; background: #f4f7f9; padding: 20px; }
-        .box { max-width: 600px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
-        .card { border-left: 4px solid #2ecc71; background: #fafafa; padding: 12px; margin-bottom: 10px; }
-        .row { display: flex; justify-content: space-between; font-size: 14px; padding: 4px 0; border-bottom: 1px dashed #ddd; }
-        .grand-total { margin-top: 20px; padding: 15px; background: #fff5f5; text-align: center; border-radius: 8px; }
-        .btn-main { width: 100%; padding: 12px; background: #1890ff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
-        .nav-bar { margin-top: 20px; display: flex; justify-content: space-between; font-size: 12px; }
-        .nav-link { text-decoration: none; color: #666; padding: 5px 8px; border: 1px solid #ccc; border-radius: 4px; }
+        body { font-family: 'PingFang SC', sans-serif; background: #f4f7f9; padding: 20px; color: #333; }
+        .box { max-width: 600px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 8px 30px rgba(0,0,0,0.05); }
+        .card { border-left: 4px solid #2ecc71; background: #fafafa; padding: 15px; margin-bottom: 15px; border-radius: 6px; }
+        .row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px dashed #eee; font-size: 14px; }
+        .grand-total { margin-top: 25px; padding: 20px; background: #fff5f5; border: 1px solid #ffccc7; border-radius: 10px; text-align: center; }
+        .amount-big { font-size: 32px; font-weight: bold; color: #ff4d4f; }
+        .btn-main { width: 100%; padding: 15px; background: #1890ff; color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; }
+        .nav-bar { margin-top: 25px; display: flex; justify-content: space-around; border-top: 1px solid #eee; padding-top: 15px; }
+        .nav-link { font-size: 12px; color: #666; text-decoration: none; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; background: #fff; }
+        .nav-link:hover { background: #f9f9f9; }
     </style>
 </head>
 <body>
     <div class="box">
-        <h2 style="text-align:center;">📜 小票解析汇总</h2>
+        <h2 style="text-align:center;">📜 小票解析 (仅显示本次)</h2>
         <form id="uploadForm" method="post" enctype="multipart/form-data">
-            <input type="file" id="fileInput" name="receipts[]" multiple required style="width:100%; margin-bottom:15px;">
+            <input type="file" id="fileInput" name="receipts[]" multiple required style="margin-bottom:20px; width: 100%;">
             <button type="submit" id="submitBtn" class="btn-main">开始解析并存入DB</button>
-            <div id="status" style="display:none; text-align:center; color:#1890ff; margin-top:10px;">处理中...</div>
+            <div id="status" style="display:none; text-align:center; margin-top:10px; color:#1890ff;">准备中...</div>
         </form>
 
         <?php if ($results): ?>
-            <div style="margin-top:20px;">
+            <div style="margin-top:30px;">
+                <h3 style="font-size: 16px; color: #1890ff;">✅ 本次解析结果：</h3>
                 <?php foreach ($results as $res): ?>
                     <div class="card">
-                        <div style="font-weight:bold; color:#888; margin-bottom:5px;">ID: <?= $res['id'] ?> | 📄 <?= htmlspecialchars($res['file']) ?></div>
+                        <small style="color:#aaa;">📄 <?= htmlspecialchars($res['file']) ?></small>
                         <?php foreach ($res['items'] as $it): ?>
                             <div class="row">
                                 <span><?= htmlspecialchars($it['name']) ?></span>
@@ -197,16 +217,16 @@ if (!empty($processedIds)) {
                     </div>
                 <?php endforeach; ?>
                 <div class="grand-total">
-                    <div style="color:#666;">本次解析总额</div>
-                    <div style="font-size:28px; color:#ff4d4f; font-weight:bold;">¥<?= number_format($totalAllAmount) ?></div>
+                    <div>本次解析总金額</div>
+                    <div class="amount-big">¥<?= number_format($totalAllAmount) ?></div>
                 </div>
             </div>
         <?php endif; ?>
 
         <div class="nav-bar">
             <a href="?action=csv" class="nav-link">📥 导出 CSV</a>
-            <a href="?action=clear_view" class="nav-link">🔄 清空页面</a>
-            <a href="?action=db_reset" class="nav-link" style="color:red;" onclick="return confirm('警告：这将删除数据库所有数据并将 ID 重置为 1！')">🗑️ 彻底重置 DB</a>
+            <a href="?action=download_log" class="nav-link">📝 下载日志</a>
+            <a href="?action=clear_view" class="nav-link" style="color:#1890ff;">🔄 清空页面</a>
         </div>
     </div>
 
@@ -216,19 +236,40 @@ if (!empty($processedIds)) {
         const btn = document.getElementById('submitBtn');
         const status = document.getElementById('status');
         const files = document.getElementById('fileInput').files;
+        if (!files.length) return;
         btn.disabled = true;
         status.style.display = "block";
         const formData = new FormData();
         for (let i = 0; i < files.length; i++) {
             status.innerText = `正在处理 (${i+1}/${files.length})...`;
-            formData.append('receipts[]', files[i]); // 这里简化了，如果需要压缩可保留原来的压缩逻辑
+            const compressed = await compressImg(files[i]);
+            formData.append('receipts[]', compressed, files[i].name);
         }
         fetch('', { method: 'POST', body: formData })
         .then(r => r.text())
         .then(html => {
-            document.body.innerHTML = new DOMParser().parseFromString(html, 'text/html').body.innerHTML;
+            const doc = new DOMParser().parseFromString(html, 'text/html');
+            document.body.innerHTML = doc.body.innerHTML;
         });
     };
+    function compressImg(file) {
+        return new Promise(resolve => {
+            const reader = new FileReader();
+            reader.readAsDataURL(file);
+            reader.onload = (e) => {
+                const img = new Image();
+                img.src = e.target.result;
+                img.onload = () => {
+                    const canvas = document.createElement('canvas');
+                    let w = img.width, h = img.height;
+                    if (w > 1200) { h = h * (1200/w); w = 1200; }
+                    canvas.width = w; canvas.height = h;
+                    canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+                    canvas.toBlob(blob => resolve(new File([blob], file.name, {type:'image/jpeg'})), 'image/jpeg', 0.8);
+                };
+            };
+        });
+    }
     </script>
 </body>
 </html>
