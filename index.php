@@ -1,66 +1,59 @@
 <?php
 /**
- * 🧾 小票解析系统 - Azure SQL データベース統合版
+ * 🧾 小票解析系统 - Azure SQL データベース統合版（クリーン表示仕様）
  */
 
-// --- 1. 配置与環境設置 ---
-@set_time_limit(600);
+// --- 1. サーバー制限の解除 ---
+@set_time_limit(0);
 @ini_set('memory_limit', '512M');
+@ini_set('max_execution_time', 0);
 
 // Azure OCR API 設定
 $endpoint = "https://24jn0321.cognitiveservices.azure.com/"; 
 $apiKey   = "BQGkM056pMBAB5KVI6wmcSLBf2JlF8X2UUiwxw5N17K9QmWljMG3JQQJ99CAACi0881XJ3w3AAAFACOGrT37"; 
-
 $logFile = 'ocr.log';
 
-// --- 2. Azure SQL 接続設定 (ここを書き換えてください) ---
-$serverName = "tcp:receipt-server-24jn0.database.windows.net,1433"; 
+// --- 2. Azure SQL 接続設定 ---
+$serverName = "tcp:receipt-server-24jn0321.database.windows.net,1433"; 
 $connectionOptions = array(
     "Database" => "receiptdb",
     "Uid" => "sqladmin",
     "PWD" => "Abc842727925",
     "CharacterSet" => "UTF-8"
 );
+
 $conn = sqlsrv_connect($serverName, $connectionOptions);
 if ($conn === false) {
-    die("<pre>" . print_r(sqlsrv_errors(), true) . "</pre>");
+    die("DB接続エラー: " . print_r(sqlsrv_errors(), true));
 }
 
-// --- 3. 動作処理 (CSV/ログ/清空) ---
+// --- 3. アクション処理 (CSV/全削除) ---
 if (isset($_GET['action'])) {
-    $action = $_GET['action'];
-    
-    // CSV出力 (DBから生成)
-    if ($action == 'csv') {
+    if ($_GET['action'] == 'csv') {
         header('Content-Type: text/csv; charset=utf-8');
         header('Content-Disposition: attachment; filename=receipt_export_'.date('Ymd').'.csv');
         echo "\xEF\xBB\xBF"; 
         $output = fopen('php://output', 'w');
-        fputcsv($output, ['ID', '文件名', '项目', '金额', '日期']);
-        
-        $sql = "SELECT r.file_name, r.processed_at, i.item_name, i.price 
-                FROM receipts r JOIN receipt_items i ON r.id = i.receipt_id";
+        fputcsv($output, ['文件名', '项目', '金额']);
+        $sql = "SELECT r.file_name, i.item_name, i.price FROM receipts r JOIN receipt_items i ON r.id = i.receipt_id";
         $stmt = sqlsrv_query($conn, $sql);
         while ($row = sqlsrv_fetch_array($stmt, SQLSRV_FETCH_ASSOC)) {
-            fputcsv($output, [$row['file_name'], $row['item_name'], $row['price'], $row['processed_at']->format('Y-m-d H:i:s')]);
+            fputcsv($output, [$row['file_name'], $row['item_name'], $row['price']]);
         }
         fclose($output); exit;
     }
-
-    if ($action == 'clear') {
-        // 子テーブルは CASCADE 設定により親を消せば消えます
+    if ($_GET['action'] == 'clear') {
         sqlsrv_query($conn, "DELETE FROM receipts");
-        header("Location: " . strtok($_SERVER["REQUEST_URI"], '?')); exit;
+        header("Location: index.php"); exit;
     }
 }
 
-// --- 4. OCR 核心解析ロジック ---
+// --- 4. OCR 解析 & DB 保存 ---
+$newInsertedIds = []; // 今回アップロードしたIDを保持
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
-    file_put_contents($logFile, "\n[" . date('Y-m-d H:i:s') . "] --- 开始識別任務 ---\n", FILE_APPEND);
-    
     foreach ($_FILES['receipts']['tmp_name'] as $key => $tmpName) {
         if (empty($tmpName)) continue;
-        if ($key > 0) sleep(1); // API負荷軽減
+        if ($key > 0) sleep(2); // 連続リクエストによるAPI制限回避
 
         $fileName = $_FILES['receipts']['name'][$key];
         $imgData = file_get_contents($tmpName);
@@ -72,97 +65,69 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
         curl_setopt($ch, CURLOPT_POSTFIELDS, $imgData);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 60);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 90);
 
         $response = curl_exec($ch);
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
 
-        if ($httpCode !== 200) {
-            file_put_contents($logFile, "  [ERROR] $fileName 请求失敗: HTTP $httpCode\n", FILE_APPEND);
-            continue; 
-        }
+        if ($httpCode === 200) {
+            $data = json_decode($response, true);
+            $lines = $data['readResult']['blocks'][0]['lines'] ?? [];
+            $currentItems = [];
+            $stopFlag = false;
 
-        $data = json_decode($response, true);
-        $lines = $data['readResult']['blocks'][0]['lines'] ?? [];
-        $currentItems = [];
-        $stopFlag = false;
+            for ($i = 0; $i < count($lines); $i++) {
+                $text = trim($lines[$i]['text']);
+                if (preg_match('/合計|合计|消費税/u', $text)) { $stopFlag = true; continue; }
+                if ($stopFlag) continue;
 
-        for ($i = 0; $i < count($lines); $i++) {
-            $text = trim($lines[$i]['text']);
-            $pureText = str_replace([' ', '　', '＊', '*', '√', '軽', '轻', '(', ')', '8%', '10%'], '', $text);
-
-            if (preg_match('/合計|合计|内消費税|消費税|対象|支払|残高|再発行/u', $pureText)) {
-                if (!empty($currentItems)) $stopFlag = true; 
-                continue; 
-            }
-            if ($stopFlag) continue;
-
-            if (preg_match('/[¥￥]([\d,]+)/u', $text, $matches)) {
-                $price = (int)str_replace(',', '', $matches[1]);
-                $nameInLine = trim(preg_replace('/[\.．…]+|[¥￥].*$/u', '', $text));
-                $cleanNameInLine = str_replace(['＊', '*', '轻', '軽', '(', ')', '.', '．', ' '], '', $nameInLine);
-
-                if (mb_strlen($cleanNameInLine) < 2 || preg_match('/^[¥￥\d,\s]+$/u', $cleanNameInLine)) {
-                    $foundName = "";
-                    for ($j = $i - 1; $j >= 0; $j--) {
-                        $prev = trim($lines[$j]['text']);
-                        $cleanPrev = str_replace(['＊', '*', ' ', '√', '軽', '轻'], '', $prev);
-                        if (mb_strlen($cleanPrev) >= 2 && !preg_match('/領|収|証|合|计|計|%|店|电话|電話|¥|￥/u', $cleanPrev)) {
-                            $foundName = $cleanPrev;
-                            break;
-                        }
-                    }
-                    $finalName = $foundName;
-                } else {
-                    $finalName = $cleanNameInLine;
-                }
-
-                if (!empty($finalName) && !preg_match('/Family|新宿|電話|登録|領収|対象|消費税|合計|内訳/u', $finalName)) {
-                    $isDuplicate = false;
-                    foreach ($currentItems as $existingItem) {
-                        if ($existingItem['name'] === $finalName && $existingItem['price'] === $price) {
-                            $isDuplicate = true; break;
-                        }
-                    }
-                    if (!$isDuplicate) {
-                        $currentItems[] = ['name' => $finalName, 'price' => $price];
+                if (preg_match('/[¥￥]([\d,]+)/u', $text, $matches)) {
+                    $price = (int)str_replace(',', '', $matches[1]);
+                    $name = trim(preg_replace('/[\.．…]+|[¥￥].*$/u', '', $text));
+                    if (mb_strlen($name) >= 2) {
+                        $currentItems[] = ['name' => $name, 'price' => $price];
                     }
                 }
             }
-        }
 
-        // --- データベースへの保存 ---
-        if (!empty($currentItems)) {
-            $sqlR = "INSERT INTO receipts (file_name) OUTPUT INSERTED.id VALUES (?)";
-            $stmtR = sqlsrv_query($conn, $sqlR, array($fileName));
-            if ($stmtR && sqlsrv_fetch($stmtR)) {
-                $receiptId = sqlsrv_get_field($stmtR, 0);
-                foreach ($currentItems as $it) {
-                    $sqlI = "INSERT INTO receipt_items (receipt_id, item_name, price) VALUES (?, ?, ?)";
-                    sqlsrv_query($conn, $sqlI, array($receiptId, $it['name'], $it['price']));
+            if (!empty($currentItems)) {
+                $sqlR = "INSERT INTO receipts (file_name) OUTPUT INSERTED.id VALUES (?)";
+                $stmtR = sqlsrv_query($conn, $sqlR, array($fileName));
+                if ($stmtR && sqlsrv_fetch($stmtR)) {
+                    $receiptId = sqlsrv_get_field($stmtR, 0);
+                    $newInsertedIds[] = $receiptId; // 今回挿入したIDを記録
+                    foreach ($currentItems as $it) {
+                        $sqlI = "INSERT INTO receipt_items (receipt_id, item_name, price) VALUES (?, ?, ?)";
+                        sqlsrv_query($conn, $sqlI, array($receiptId, $it['name'], $it['price']));
+                    }
                 }
-                file_put_contents($logFile, "  [DB SUCCESS] $fileName\n", FILE_APPEND);
             }
         }
     }
 }
 
-// --- 5. 表示用データの読み取り ---
+// --- 5. 表示データの取得 ---
 $results = [];
 $totalAllAmount = 0;
-$sqlMain = "SELECT id, file_name FROM receipts ORDER BY processed_at DESC";
-$resMain = sqlsrv_query($conn, $sqlMain);
-if ($resMain) {
-    while ($row = sqlsrv_fetch_array($resMain, SQLSRV_FETCH_ASSOC)) {
-        $items = [];
-        $sqlSub = "SELECT item_name as name, price FROM receipt_items WHERE receipt_id = ?";
-        $resSub = sqlsrv_query($conn, $sqlSub, array($row['id']));
-        while ($it = sqlsrv_fetch_array($resSub, SQLSRV_FETCH_ASSOC)) {
-            $items[] = $it;
-            $totalAllAmount += $it['price'];
+
+// 条件：POST直後（今回の結果）または 履歴表示ボタンが押された時のみ取得
+if (!empty($newInsertedIds) || isset($_GET['view'])) {
+    // 履歴表示なら全件、POST直後なら今回のIDのみ
+    $whereClause = !empty($newInsertedIds) ? "WHERE id IN (" . implode(',', $newInsertedIds) . ")" : "";
+    $sqlMain = "SELECT id, file_name FROM receipts $whereClause ORDER BY id DESC";
+    
+    $resMain = sqlsrv_query($conn, $sqlMain);
+    if ($resMain) {
+        while ($row = sqlsrv_fetch_array($resMain, SQLSRV_FETCH_ASSOC)) {
+            $items = [];
+            $resSub = sqlsrv_query($conn, "SELECT item_name as name, price FROM receipt_items WHERE receipt_id = ?", array($row['id']));
+            while ($it = sqlsrv_fetch_array($resSub, SQLSRV_FETCH_ASSOC)) {
+                $items[] = $it;
+                $totalAllAmount += $it['price'];
+            }
+            $results[] = ['file' => $row['file_name'], 'items' => $items];
         }
-        $results[] = ['file' => $row['file_name'], 'items' => $items];
     }
 }
 ?>
@@ -171,7 +136,7 @@ if ($resMain) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Azure SQL 小票解析汇总</title>
+    <title>小票解析汇总</title>
     <style>
         body { font-family: 'PingFang SC', sans-serif; background: #f4f7f9; padding: 20px; color: #333; }
         .box { max-width: 600px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 8px 30px rgba(0,0,0,0.05); }
@@ -181,22 +146,24 @@ if ($resMain) {
         .amount-big { font-size: 32px; font-weight: bold; color: #ff4d4f; }
         .btn-main { width: 100%; padding: 15px; background: #1890ff; color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; }
         .nav-bar { margin-top: 25px; display: flex; justify-content: space-around; border-top: 1px solid #eee; padding-top: 15px; }
-        .nav-link { font-size: 13px; color: #666; text-decoration: none; padding: 6px 12px; border: 1px solid #ddd; border-radius: 4px; }
-        #status { color: #1890ff; text-align: center; margin-top: 10px; font-size: 13px; }
+        .nav-link { font-size: 12px; color: #666; text-decoration: none; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; }
+        #status { color: #1890ff; text-align: center; margin: 10px 0; font-size: 13px; font-weight: bold; }
+        .empty-state { text-align: center; color: #ccc; margin: 40px 0; }
     </style>
 </head>
 <body>
     <div class="box">
-        <h2 style="text-align:center;">📜 小票解析汇总 (SQL版)</h2>
+        <h2 style="text-align:center;">📜 小票解析汇总</h2>
         
         <form id="uploadForm" method="post" enctype="multipart/form-data">
             <input type="file" id="fileInput" name="receipts[]" multiple required style="margin-bottom:20px; width: 100%;">
-            <button type="submit" id="submitBtn" class="btn-main">开始解析并存入DB</button>
-            <div id="status" style="display:none;">准备中...</div>
+            <button type="submit" id="submitBtn" class="btn-main">開始解析 (多枚対応)</button>
+            <div id="status" style="display:none;"></div>
         </form>
 
-        <?php if ($results): ?>
+        <?php if (!empty($results)): ?>
             <div style="margin-top:30px;">
+                <h3 style="font-size:16px; color:#1890ff;"><?= isset($_GET['view']) ? '📜 履歴表示' : '✨ 今回の結果' ?></h3>
                 <?php foreach ($results as $res): ?>
                     <div class="card">
                         <small style="color:#aaa;">📄 <?= htmlspecialchars($res['file']) ?></small>
@@ -210,15 +177,20 @@ if ($resMain) {
                 <?php endforeach; ?>
 
                 <div class="grand-total">
-                    <div>DB累计金額</div>
+                    <div>合計金額</div>
                     <div class="amount-big">¥<?= number_format($totalAllAmount) ?></div>
                 </div>
+            </div>
+        <?php else: ?>
+            <div class="empty-state">
+                <p>画像をアップロードしてください。<br>結果がここに表示されます。</p>
             </div>
         <?php endif; ?>
 
         <div class="nav-bar">
-            <a href="?action=csv" class="nav-link">📥 导出 CSV</a>
-            <a href="?action=clear" class="nav-link" style="color:#ff4d4f;" onclick="return confirm('确定清空DB吗？')">🗑️ 清空重置</a>
+            <a href="?view=1" class="nav-link">📜 履歴を見る</a>
+            <a href="?action=csv" class="nav-link">📥 CSV出力</a>
+            <a href="?action=clear" class="nav-link" style="color:#ff4d4f; border-color:#ffccc7;" onclick="return confirm('全履歴を消去しますか？')">🗑️ リセット</a>
         </div>
     </div>
 
@@ -228,23 +200,27 @@ if ($resMain) {
         const btn = document.getElementById('submitBtn');
         const status = document.getElementById('status');
         const files = document.getElementById('fileInput').files;
-        if (!files.length) return;
-
+        
         btn.disabled = true;
         status.style.display = "block";
 
         const formData = new FormData();
         for (let i = 0; i < files.length; i++) {
-            status.innerText = `正在处理 (${i+1}/${files.length})...`;
+            status.innerText = `画像を圧縮中 (${i+1}/${files.length})...`;
             const compressed = await compressImg(files[i]);
             formData.append('receipts[]', compressed, files[i].name);
         }
 
+        status.innerText = "Azureで解析中... しばらくお待ちください。";
+        
         fetch('', { method: 'POST', body: formData })
         .then(r => r.text())
         .then(html => {
-            const doc = new DOMParser().parseFromString(html, 'text/html');
-            document.body.innerHTML = doc.body.innerHTML;
+            document.body.innerHTML = new DOMParser().parseFromString(html, 'text/html').body.innerHTML;
+        })
+        .catch(err => {
+            alert("エラーが発生しました。");
+            btn.disabled = false;
         });
     };
 
@@ -258,7 +234,7 @@ if ($resMain) {
                 img.onload = () => {
                     const canvas = document.createElement('canvas');
                     let w = img.width, h = img.height;
-                    if (w > 1200) { h = h * (1200/w); w = 1200; }
+                    if (w > 1200) { h *= 1200/w; w = 1200; }
                     canvas.width = w; canvas.height = h;
                     canvas.getContext('2d').drawImage(img, 0, 0, w, h);
                     canvas.toBlob(blob => resolve(new File([blob], file.name, {type:'image/jpeg'})), 'image/jpeg', 0.8);
