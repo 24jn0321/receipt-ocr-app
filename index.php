@@ -146,10 +146,84 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
 <body>
     <div class="box">
         <h2 style="text-align:center;">🧾 小票解析 (多图稳定版)</h2>
-        <form method="post" enctype="multipart/form-data">
-            <input type="file" name="receipts[]" multiple required style="margin-bottom:15px;"><br>
-            <button type="submit" class="btn">执行解析</button>
-        </form>
+       <form id="uploadForm" method="post" enctype="multipart/form-data">
+    <input type="file" id="fileInput" name="receipts[]" multiple required style="margin-bottom:15px;"><br>
+    <button type="submit" id="submitBtn" class="btn">执行解析</button>
+    <p id="status" style="display:none; color:#3498db; font-size:14px; margin-top:10px;">正在压缩图片并解析，请稍候...</p>
+</form>
+
+<script>
+document.getElementById('uploadForm').onsubmit = async function(e) {
+    e.preventDefault();
+    const btn = document.getElementById('submitBtn');
+    const status = document.getElementById('status');
+    const files = document.getElementById('fileInput').files;
+    
+    if (files.length === 0) return;
+
+    btn.disabled = true;
+    btn.innerText = "处理中...";
+    status.style.display = "block";
+
+    const formData = new FormData();
+
+    // 逐个压缩文件
+    for (let i = 0; i < files.length; i++) {
+        const compressedFile = await compressImage(files[i]);
+        formData.append('receipts[]', compressedFile, files[i].name);
+    }
+
+    // 使用 fetch 发送压缩后的数据
+    fetch('', {
+        method: 'POST',
+        body: formData
+    }).then(response => response.text())
+      .then(html => {
+          // 刷新页面显示结果
+          document.open();
+          document.write(html);
+          document.close();
+      }).catch(err => {
+          alert("上传失败: " + err);
+          btn.disabled = false;
+          btn.innerText = "执行解析";
+      });
+};
+
+// 核心：图片压缩函数
+function compressImage(file) {
+    return new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.readAsDataURL(file);
+        reader.onload = function(event) {
+            const img = new Image();
+            img.src = event.target.result;
+            img.onload = function() {
+                const canvas = document.createElement('canvas');
+                let width = img.width;
+                let height = img.height;
+
+                // 如果图片太大，等比例缩小尺寸
+                const MAX_WIDTH = 1200; 
+                if (width > MAX_WIDTH) {
+                    height *= MAX_WIDTH / width;
+                    width = MAX_WIDTH;
+                }
+
+                canvas.width = width;
+                canvas.height = height;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0, width, height);
+                
+                // 关键：将质量设为 0.7 (70%)，体积会剧减 80% 以上
+                canvas.toBlob((blob) => {
+                    resolve(new File([blob], file.name, { type: 'image/jpeg' }));
+                }, 'image/jpeg', 0.7);
+            };
+        };
+    });
+}
+</script>
 
         <?php if ($results): ?>
             <?php foreach ($results as $res): ?>
@@ -177,3 +251,4 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
     </div>
 </body>
 </html>
+
