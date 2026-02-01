@@ -1,5 +1,104 @@
 <?php
-// ... (保留您原有的 OCR 处理逻辑、API 密钥和数据读取部分，代码省略以节省篇幅) ...
+@set_time_limit(600);
+@ini_set('memory_limit', '512M');
+
+$endpoint = "https://24jn0321.cognitiveservices.azure.com/";
+$apiKey   = "BQGkM056pMBAB5KVI6wmcSLBf2JlF8X2UUiwxw5N17K9QmWljMG3JQQJ99CAACi0881XJ3w3AAAFACOGrT37"; 
+
+$results = [];
+$totalAllAmount = 0;
+$storageFile = 'ocr_data.json';
+$logFile = 'ocr.log';
+
+/* ===== 导出接口 ===== */
+if (isset($_GET['action'])) {
+    if ($_GET['action'] === 'csv' && file_exists($storageFile)) {
+        header('Content-Type: text/csv; charset=utf-8');
+        header('Content-Disposition: attachment; filename=receipt_export.csv');
+        echo "\xEF\xBB\xBF";
+        $out = fopen('php://output', 'w');
+        fputcsv($out, ['文件名', '项目', '金额']);
+        $data = json_decode(file_get_contents($storageFile), true);
+        foreach ($data as $r)
+            foreach ($r['items'] as $i)
+                fputcsv($out, [$r['file'], $i['name'], $i['price']]);
+        fclose($out); exit;
+    }
+    if ($_GET['action'] === 'log' && file_exists($logFile)) {
+        header('Content-Type: text/plain; charset=utf-8');
+        readfile($logFile); exit;
+    }
+}
+
+/* ===== OCR 核心 ===== */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['receipts'])) {
+    file_put_contents($logFile, "=== SCAN " . date('Y-m-d H:i:s') . " ===\n");
+
+    foreach ($_FILES['receipts']['tmp_name'] as $k => $tmp) {
+        if (!$tmp) continue;
+        if ($k > 0) sleep(2);
+
+        $fileName = $_FILES['receipts']['name'][$k];
+        $imgData = file_get_contents($tmp);
+
+        $url = rtrim($endpoint, '/') .
+            "/computervision/imageanalysis:analyze?api-version=2023-10-01&features=read";
+
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_POST => true,
+            CURLOPT_HTTPHEADER => [
+                'Content-Type: application/octet-stream',
+                'Ocp-Apim-Subscription-Key: ' . $apiKey
+            ],
+            CURLOPT_POSTFIELDS => $imgData,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_TIMEOUT => 60
+        ]);
+        $res = curl_exec($ch);
+        curl_close($ch);
+
+        $json = json_decode($res, true);
+        $lines = $json['readResult']['blocks'][0]['lines'] ?? [];
+
+        $items = [];
+        $stop = false;
+
+        for ($i = 0; $i < count($lines); $i++) {
+            $text = trim($lines[$i]['text']);
+            $pure = str_replace([' ', '＊', '*'], '', $text);
+
+            if (preg_match('/合计|消費税|支払|残高/u', $pure)) {
+                if ($items) $stop = true;
+                continue;
+            }
+            if ($stop) continue;
+
+            if (preg_match('/[¥￥]([\d,]+)/u', $text, $m)) {
+                $price = (int)str_replace(',', '', $m[1]);
+                $name = trim(preg_replace('/[¥￥].*/u', '', $text));
+                if (mb_strlen($name) < 2) {
+                    for ($j = $i - 1; $j >= 0; $j--) {
+                        $p = trim($lines[$j]['text']);
+                        if (mb_strlen($p) >= 2) { $name = $p; break; }
+                    }
+                }
+                if ($name) $items[] = ['name' => $name, 'price' => $price];
+            }
+        }
+        $results[] = ['file' => $fileName, 'items' => $items];
+    }
+    file_put_contents($storageFile, json_encode($results, JSON_UNESCAPED_UNICODE));
+}
+elseif (file_exists($storageFile)) {
+    $results = json_decode(file_get_contents($storageFile), true);
+}
+
+if ($results)
+    foreach ($results as $r)
+        foreach ($r['items'] as $i)
+            $totalAllAmount += $i['price'];
 ?>
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -37,21 +136,18 @@ header h1 {
     margin:0 0 36px;
 }
 
-/* --- 核心修复部分 --- */
+/* 核心修改：让选择框撑满并对齐 */
 .upload {
-    display: block;           /* 改为块级元素，使其撑满宽度 */
-    box-sizing: border-box;    /* 确保 padding 不撑破宽度 */
-    width: 100%;              /* 宽度与按钮一致 */
+    display: block;           /* 块级化 */
+    box-sizing: border-box;    /* 防止撑破 */
+    width: 100%;              /* 撑满容器 */
     border: 1.5px dashed var(--border);
     border-radius: 14px;
-    padding: 32px 20px;
+    padding: 32px 20px;       /* 稍微增加内边距更美观 */
     text-align: center;
     cursor: pointer;
     transition: .25s;
-    margin-bottom: 8px;       /* 调整与按钮的间距 */
 }
-/* ------------------- */
-
 .upload:hover {
     background:#f8fafc;
     border-color:#c7d2fe;
@@ -68,36 +164,36 @@ header h1 {
 
 .btn {
     width:100%;
-    margin-top:14px;
+    margin-top:22px;
     padding:15px;
     border-radius:10px;
     border:none;
     background:#0f172a;
     color:#fff;
     font-size:15px;
-    font-weight: 500;
     cursor:pointer;
+    font-weight: 500;
 }
 #status {
     margin-top:14px;
     text-align:center;
     font-size:13px;
     color:#2563eb;
-    height: 18px;
+    height: 18px; /* 固定高度防止抖动 */
 }
 
 /* Items */
 .item {
     display:flex;
     justify-content:space-between;
-    padding:16px 0;
+    padding:14px 0;
     border-bottom:1px solid #f1f5f9;
 }
 .price { font-family:monospace; font-weight: 500; }
 
 /* Summary */
 .total {
-    margin-top:40px;
+    margin-top:52px;
     padding-top:22px;
     border-top:1px solid var(--border);
     display:flex;
@@ -125,46 +221,53 @@ header h1 {
 
 <body>
 <div class="app">
-    <header>
-        <h1>小票解析</h1>
-    </header>
+<header>
+    <h1>小票解析</h1>
+</header>
 
-    <form id="f" method="post" enctype="multipart/form-data">
-        <label class="upload">
-            <input type="file" id="i" name="receipts[]" multiple hidden>
-            <div class="upload-main">选择小票图片</div>
-            <div class="upload-sub">点击选择或拖拽上传</div>
-        </label>
-        <button class="btn">开始解析</button>
-        <div id="status"></div>
-    </form>
+<form id="f" method="post" enctype="multipart/form-data">
+<label class="upload">
+    <input type="file" id="i" name="receipts[]" multiple hidden>
+    <div class="upload-main">选择小票图片</div>
+    <div class="upload-sub">点击选择或拖拽上传</div>
+</label>
+<button class="btn">开始解析</button>
+<div id="status"></div>
+</form>
 
-    <?php if ($results): ?>
-    <div style="margin-top: 20px;">
-        <?php foreach ($results as $r): ?>
-            <?php foreach ($r['items'] as $i): ?>
-            <div class="item">
-                <span><?= htmlspecialchars($i['name']) ?></span>
-                <span class="price">¥<?= number_format($i['price']) ?></span>
-            </div>
-            <?php endforeach; ?>
-        <?php endforeach; ?>
-    </div>
+<?php if ($results): ?>
+<?php foreach ($results as $r): ?>
+<?php foreach ($r['items'] as $i): ?>
+<div class="item">
+    <span><?= htmlspecialchars($i['name']) ?></span>
+    <span class="price">¥<?= number_format($i['price']) ?></span>
+</div>
+<?php endforeach; endforeach; ?>
 
-    <div class="total">
-        <span>合计</span>
-        <strong>¥<?= number_format($totalAllAmount) ?></strong>
-    </div>
-    <?php endif; ?>
+<div class="total">
+    <span>合计</span>
+    <strong>¥<?= number_format($totalAllAmount) ?></strong>
+</div>
+<?php endif; ?>
 
-    <div class="footer">
-        <a href="?action=csv">CSV 导出</a>
-        <a href="?action=log">运行日志</a>
-    </div>
+<div class="footer">
+    <a href="?action=csv">CSV 导出</a>
+    <a href="?action=log">运行日志</a>
+</div>
 </div>
 
 <script>
-// ... (保留您原有的异步提交脚本) ...
+const f=document.getElementById('f'),
+i=document.getElementById('i'),
+s=document.getElementById('status');
+f.onsubmit=e=>{
+    e.preventDefault();
+    s.innerText='处理中…';
+    fetch('',{method:'POST',body:new FormData(f)})
+        .then(r=>r.text())
+        .then(h=>document.body.innerHTML=
+            new DOMParser().parseFromString(h,'text/html').body.innerHTML);
+};
 </script>
 </body>
 </html>
