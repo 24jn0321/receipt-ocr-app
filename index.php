@@ -3,7 +3,7 @@
 @ini_set('memory_limit', '512M');
 
 $endpoint = "https://24jn0321.cognitiveservices.azure.com/";
-$apiKey   = "BQGkM056pMBAB5KVI6wmcSLBf2JlF8X2UUiwxw5N17K9QmWljMG3JQQJ99CAACi0881XJ3w3AAAFACOGrT37"; 
+$apiKey   = "你的KEY";
 
 $results = [];
 $totalAllAmount = 0;
@@ -115,6 +115,7 @@ if ($results)
     --sub:#64748b;
     --border:#e5e7eb;
 }
+
 body {
     margin:0;
     padding:48px 16px;
@@ -122,6 +123,7 @@ body {
     background:var(--bg);
     color:var(--text);
 }
+
 .app {
     max-width:520px;
     margin:auto;
@@ -130,23 +132,25 @@ body {
     padding:40px 32px 48px;
     box-shadow:0 10px 30px rgba(0,0,0,.06);
 }
+
 header h1 {
     font-size:26px;
     font-weight:600;
     margin:0 0 36px;
 }
 
-/* 核心修改：让选择框撑满并对齐 */
+/* Upload */
 .upload {
-    display: block;           /* 块级化 */
-    box-sizing: border-box;    /* 防止撑破 */
-    width: 100%;              /* 撑满容器 */
-    border: 1.5px dashed var(--border);
-    border-radius: 14px;
-    padding: 32px 20px;       /* 稍微增加内边距更美观 */
-    text-align: center;
-    cursor: pointer;
-    transition: .25s;
+    display:block;
+    width:100%;
+    box-sizing:border-box;          /* ✅ 正确合并在这里 */
+    border:1.5px dashed var(--border);
+    border-radius:14px;
+    padding:28px 20px;
+    text-align:center;
+    cursor:pointer;
+    transition:.25s;
+    margin-bottom:22px;
 }
 .upload:hover {
     background:#f8fafc;
@@ -164,7 +168,6 @@ header h1 {
 
 .btn {
     width:100%;
-    margin-top:22px;
     padding:15px;
     border-radius:10px;
     border:none;
@@ -172,14 +175,13 @@ header h1 {
     color:#fff;
     font-size:15px;
     cursor:pointer;
-    font-weight: 500;
 }
+
 #status {
     margin-top:14px;
     text-align:center;
     font-size:13px;
     color:#2563eb;
-    height: 18px; /* 固定高度防止抖动 */
 }
 
 /* Items */
@@ -189,7 +191,7 @@ header h1 {
     padding:14px 0;
     border-bottom:1px solid #f1f5f9;
 }
-.price { font-family:monospace; font-weight: 500; }
+.price { font-family:monospace; }
 
 /* Summary */
 .total {
@@ -198,7 +200,6 @@ header h1 {
     border-top:1px solid var(--border);
     display:flex;
     justify-content:space-between;
-    align-items: center;
 }
 .total strong {
     font-size:30px;
@@ -221,6 +222,7 @@ header h1 {
 
 <body>
 <div class="app">
+
 <header>
     <h1>小票解析</h1>
 </header>
@@ -231,6 +233,7 @@ header h1 {
     <div class="upload-main">选择小票图片</div>
     <div class="upload-sub">点击选择或拖拽上传</div>
 </label>
+
 <button class="btn">开始解析</button>
 <div id="status"></div>
 </form>
@@ -254,12 +257,14 @@ header h1 {
     <a href="?action=csv">CSV 导出</a>
     <a href="?action=log">运行日志</a>
 </div>
+
 </div>
 
 <script>
 const f=document.getElementById('f'),
-i=document.getElementById('i'),
-s=document.getElementById('status');
+      i=document.getElementById('i'),
+      s=document.getElementById('status');
+
 f.onsubmit=e=>{
     e.preventDefault();
     s.innerText='处理中…';
