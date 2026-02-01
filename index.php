@@ -1,7 +1,15 @@
 <?php
 /**
- * 🧾 小票解析系统 - 最终集成版 (支持多图 + 自动压缩 + 算法回溯)
+ * 🧾 小票解析系统 - 最终集成增强版
+ * 修复内容：
+ * 1. 解决 413 错误（前端压缩）
+ * 2. 解决多图识别失败（后端延时 + 超时设置）
+ * 3. 找回核心算法（向上回溯找商品名）
  */
+
+// --- 1. 环境优化设置 ---
+@set_time_limit(300);          // 设置脚本最大执行时间为5分钟
+@ini_set('memory_limit', '256M'); // 提高内存限制处理大图
 
 $endpoint = "https://24jn0321.cognitiveservices.azure.com/"; 
 $apiKey   = "BQGkM056pMBAB5KVI6wmcSLBf2JlF8X2UUiwxw5N17K9QmWljMG3JQQJ99CAACi0881XJ3w3AAAFACOGrT37"; 
@@ -10,7 +18,7 @@ $results = [];
 $storageFile = 'ocr_data.json';
 $logFile = 'ocr.log';
 
-// --- A. 下载处理 (CSV & LOG) ---
+// --- A. 功能接口 (CSV/LOG 下载) ---
 if (isset($_GET['action'])) {
     $action = $_GET['action'];
     if ($action == 'csv' && file_exists($storageFile)) {
@@ -35,13 +43,16 @@ if (isset($_GET['action'])) {
     }
 }
 
-// --- B. OCR 解析逻辑 ---
+// --- B. OCR 核心解析逻辑 ---
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
     file_put_contents($logFile, "--- OCR DEBUG LOG " . date('Y-m-d H:i:s') . " ---\n");
     
     foreach ($_FILES['receipts']['tmp_name'] as $key => $tmpName) {
         if (empty($tmpName)) continue;
         
+        // --- 关键修复：处理多张图时，每张间隔 1 秒，防止 API 拒绝请求 ---
+        if ($key > 0) { sleep(1); } 
+
         $fileName = $_FILES['receipts']['name'][$key];
         $imgData = file_get_contents($tmpName);
         $apiUrl = rtrim($endpoint, '/') . "/computervision/imageanalysis:analyze?api-version=2023-10-01&features=read";
@@ -52,7 +63,8 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
         curl_setopt($ch, CURLOPT_POSTFIELDS, $imgData);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-        $response = curl_exec($ch); curl_close($ch);
+        $response = curl_exec($ch); 
+        curl_close($ch);
 
         $data = json_decode($response, true);
         $lines = $data['readResult']['blocks'][0]['lines'] ?? [];
@@ -80,7 +92,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
                 $nameInLine = trim(preg_replace('/[\.．…]+|[¥￥].*$/u', '', $text));
                 $cleanNameInLine = str_replace(['＊', '*', '轻', '軽', '◎', '(', ')', '.', '．', ' '], '', $nameInLine);
 
-                // --- 核心：名称为空或纯数字时，向上寻找商品名 ---
+                // --- 核心算法：向上回溯找商品名 ---
                 if (empty($cleanNameInLine) || preg_match('/^[¥￥\d,\s]+$/u', $cleanNameInLine)) {
                     $foundName = "";
                     for ($j = $i - 1; $j >= 0; $j--) {
@@ -122,24 +134,26 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
     <meta charset="UTF-8">
     <title>小票解析终极版</title>
     <style>
-        body { font-family: sans-serif; background: #f4f7f6; padding: 20px; }
+        body { font-family: 'PingFang SC', sans-serif; background: #f4f7f6; padding: 20px; }
         .box { max-width: 650px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
         .card { border-left: 5px solid #2ecc71; background: #fafafa; padding: 15px; margin-top: 15px; border-radius: 4px; border-bottom: 1px solid #ddd; }
         .row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px dashed #eee; }
         .total { font-size: 20px; font-weight: bold; color: #e74c3c; text-align: right; margin-top: 10px; }
         .btn { width: 100%; padding: 12px; background: #3498db; color: white; border: none; cursor: pointer; border-radius: 6px; font-weight: bold; }
+        .btn:disabled { background: #95a5a6; }
         .actions { margin-top: 30px; display: flex; justify-content: center; gap: 20px; border-top: 1px solid #eee; padding-top: 20px; }
         .link-btn { text-decoration: none; font-size: 14px; font-weight: bold; color: #3498db; border: 1px solid #3498db; padding: 8px 15px; border-radius: 5px; }
     </style>
 </head>
 <body>
     <div class="box">
-        <h2 style="text-align:center;">🧾 小票解析 (多图稳定版)</h2>
+        <h2 style="text-align:center;">🧾 小票解析 (多图增强版)</h2>
         
         <form id="uploadForm" method="post" enctype="multipart/form-data">
+            <p style="font-size:12px; color:#666;">支持同时选中多张小票上传</p>
             <input type="file" id="fileInput" name="receipts[]" multiple required style="margin-bottom:15px;"><br>
             <button type="submit" id="submitBtn" class="btn">执行解析</button>
-            <p id="status" style="display:none; color:#3498db; font-size:14px; margin-top:10px;">正在压缩并解析，请稍候...</p>
+            <p id="status" style="display:none; color:#3498db; font-size:14px; margin-top:10px; text-align:center;">📸 正在压缩图片并解析，请耐心稍候...</p>
         </form>
 
         <script>
@@ -151,11 +165,12 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
             if (files.length === 0) return;
 
             btn.disabled = true;
-            btn.innerText = "处理中...";
+            btn.innerText = "正在处理第 1 张...";
             status.style.display = "block";
 
             const formData = new FormData();
             for (let i = 0; i < files.length; i++) {
+                btn.innerText = `正在处理第 ${i+1} 张...`;
                 const compressedFile = await compressImage(files[i]);
                 formData.append('receipts[]', compressedFile, files[i].name);
             }
@@ -166,9 +181,12 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
                 const doc = new DOMParser().parseFromString(html, 'text/html');
                 document.body.innerHTML = doc.body.innerHTML;
             })
-            .catch(err => alert("上传失败: " + err))
-            .finally(() => {
+            .catch(err => {
+                alert("解析失败，可能是网络问题或API受限。");
                 btn.disabled = false;
+                btn.innerText = "执行解析";
+            })
+            .finally(() => {
                 status.style.display = "none";
             });
         };
@@ -183,10 +201,11 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
                     img.onload = () => {
                         const canvas = document.createElement('canvas');
                         let w = img.width, h = img.height;
+                        // 将最大宽度限制在1200像素，保证识别率的同时剧减体积
                         if (w > 1200) { h *= 1200 / w; w = 1200; }
                         canvas.width = w; canvas.height = h;
                         canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-                        canvas.toBlob(b => resolve(new File([b], file.name, {type:'image/jpeg'})), 'image/jpeg', 0.7);
+                        canvas.toBlob(b => resolve(new File([b], file.name, {type:'image/jpeg'})), 'image/jpeg', 0.8);
                     };
                 };
             });
@@ -196,9 +215,9 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
         <?php if ($results): ?>
             <?php foreach ($results as $res): ?>
                 <div class="card">
-                    <small style="color:#999">📄 文件: <?= htmlspecialchars($res['file']) ?></small>
+                    <small style="color:#999">📄 文件名: <?= htmlspecialchars($res['file']) ?></small>
                     <?php if (empty($res['items'])): ?>
-                        <p style="color:#999; font-size:14px;">未检测到商品信息。</p>
+                        <p style="color:#999; font-size:14px;">未检测到有效商品。</p>
                     <?php else: ?>
                         <?php foreach ($res['items'] as $it): ?>
                             <div class="row">
@@ -206,7 +225,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
                                 <span>¥<?= number_format($it['price']) ?></span>
                             </div>
                         <?php endforeach; ?>
-                        <div class="total">合计 ¥<?= number_format($res['total']) ?></div>
+                        <div class="total">小计 ¥<?= number_format($res['total']) ?></div>
                     <?php endif; ?>
                 </div>
             <?php endforeach; ?>
@@ -214,7 +233,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
 
         <div class="actions">
             <a href="?action=csv" class="link-btn">📥 下载 CSV 报表</a>
-            <a href="?action=log" class="link-btn" style="color:#7f8c8d; border-color:#7f8c8d;">📜 查看日志</a>
+            <a href="?action=log" class="link-btn" style="color:#7f8c8d; border-color:#7f8c8d;">📜 查看调试日志</a>
         </div>
     </div>
 </body>
