@@ -1,56 +1,67 @@
 <?php
 /**
- * 🧾 小票解析系统 - 终极稳定去重版
- * 功能：多图上传、自动压缩、追加保存、智能去重、保留◎
+ * 🧾 小票解析系统 - Azure SQL データベース統合版
  */
 
-// --- 1. 配置与环境设置 ---
+// --- 1. 配置与環境設置 ---
 @set_time_limit(600);
 @ini_set('memory_limit', '512M');
 
+// Azure OCR API 設定
 $endpoint = "https://24jn0321.cognitiveservices.azure.com/"; 
 $apiKey   = "BQGkM056pMBAB5KVI6wmcSLBf2JlF8X2UUiwxw5N17K9QmWljMG3JQQJ99CAACi0881XJ3w3AAAFACOGrT37"; 
 
-$storageFile = 'ocr_data.json';
 $logFile = 'ocr.log';
 
-// --- 2. 接口处理 (CSV下载/日志/清空) ---
+// --- 2. Azure SQL 接続設定 (ここを書き換えてください) ---
+$serverName = "tcp:あなたのサーバー名.database.windows.net,1433"; 
+$connectionOptions = array(
+    "Database" => "receipt-server-24jn0.database.windows.net",
+    "Uid" => "sqladmin",
+    "PWD" => "Abc842727925",
+    "CharacterSet" => "UTF-8"
+);
+
+$conn = sqlsrv_connect($serverName, $connectionOptions);
+if ($conn === false) {
+    die("<pre>" . print_r(sqlsrv_errors(), true) . "</pre>");
+}
+
+// --- 3. 動作処理 (CSV/ログ/清空) ---
 if (isset($_GET['action'])) {
     $action = $_GET['action'];
-    if ($action == 'csv' && file_exists($storageFile)) {
+    
+    // CSV出力 (DBから生成)
+    if ($action == 'csv') {
         header('Content-Type: text/csv; charset=utf-8');
         header('Content-Disposition: attachment; filename=receipt_export_'.date('Ymd').'.csv');
         echo "\xEF\xBB\xBF"; 
         $output = fopen('php://output', 'w');
-        fputcsv($output, ['文件名', '项目', '金额']);
-        $data = json_decode(file_get_contents($storageFile), true);
-        foreach ($data as $res) {
-            foreach ($res['items'] as $it) {
-                fputcsv($output, [$res['file'], $it['name'], $it['price']]);
-            }
+        fputcsv($output, ['ID', '文件名', '项目', '金额', '日期']);
+        
+        $sql = "SELECT r.file_name, r.processed_at, i.item_name, i.price 
+                FROM receipts r JOIN receipt_items i ON r.id = i.receipt_id";
+        $stmt = sqlsrv_query($conn, $sql);
+        while ($row = sqlsrv_fetch_array($stmt, SQLSRV_FETCH_ASSOC)) {
+            fputcsv($output, [$row['file_name'], $row['item_name'], $row['price'], $row['processed_at']->format('Y-m-d H:i:s')]);
         }
         fclose($output); exit;
     }
-    if ($action == 'log' && file_exists($logFile)) {
-        header('Content-Type: text/plain; charset=utf-8');
-        readfile($logFile); exit;
-    }
+
     if ($action == 'clear') {
-        if (file_exists($storageFile)) unlink($storageFile);
+        // 子テーブルは CASCADE 設定により親を消せば消えます
+        sqlsrv_query($conn, "DELETE FROM receipts");
         header("Location: " . strtok($_SERVER["REQUEST_URI"], '?')); exit;
     }
 }
 
-// --- 3. OCR 核心解析逻辑 ---
-$results = file_exists($storageFile) ? json_decode(file_get_contents($storageFile), true) : [];
-
+// --- 4. OCR 核心解析ロジック ---
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
-    file_put_contents($logFile, "\n[" . date('Y-m-d H:i:s') . "] --- 开始识别任务 ---\n", FILE_APPEND);
+    file_put_contents($logFile, "\n[" . date('Y-m-d H:i:s') . "] --- 开始識別任務 ---\n", FILE_APPEND);
     
-    $newResults = [];
     foreach ($_FILES['receipts']['tmp_name'] as $key => $tmpName) {
         if (empty($tmpName)) continue;
-        if ($key > 0) sleep(2); // 避免触发 API 频率限制
+        if ($key > 0) sleep(1); // API負荷軽減
 
         $fileName = $_FILES['receipts']['name'][$key];
         $imgData = file_get_contents($tmpName);
@@ -69,7 +80,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
         curl_close($ch);
 
         if ($httpCode !== 200) {
-            file_put_contents($logFile, "  [ERROR] $fileName 请求失败: HTTP $httpCode\n", FILE_APPEND);
+            file_put_contents($logFile, "  [ERROR] $fileName 请求失敗: HTTP $httpCode\n", FILE_APPEND);
             continue; 
         }
 
@@ -80,23 +91,19 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
 
         for ($i = 0; $i < count($lines); $i++) {
             $text = trim($lines[$i]['text']);
-            // 过滤无用字符但保留 ◎
             $pureText = str_replace([' ', '　', '＊', '*', '√', '軽', '轻', '(', ')', '8%', '10%'], '', $text);
 
-            // 遇到合计/税额等关键词停止解析后续条目
             if (preg_match('/合計|合计|内消費税|消費税|対象|支払|残高|再発行/u', $pureText)) {
                 if (!empty($currentItems)) $stopFlag = true; 
                 continue; 
             }
             if ($stopFlag) continue;
 
-            // 匹配金额行
             if (preg_match('/[¥￥]([\d,]+)/u', $text, $matches)) {
                 $price = (int)str_replace(',', '', $matches[1]);
                 $nameInLine = trim(preg_replace('/[\.．…]+|[¥￥].*$/u', '', $text));
                 $cleanNameInLine = str_replace(['＊', '*', '轻', '軽', '(', ')', '.', '．', ' '], '', $nameInLine);
 
-                // 名字提取逻辑 (如果本行名字太短则向上回溯)
                 if (mb_strlen($cleanNameInLine) < 2 || preg_match('/^[¥￥\d,\s]+$/u', $cleanNameInLine)) {
                     $foundName = "";
                     for ($j = $i - 1; $j >= 0; $j--) {
@@ -112,13 +119,11 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
                     $finalName = $cleanNameInLine;
                 }
 
-                // --- 智能去重逻辑 ---
                 if (!empty($finalName) && !preg_match('/Family|新宿|電話|登録|領収|対象|消費税|合計|内訳/u', $finalName)) {
                     $isDuplicate = false;
                     foreach ($currentItems as $existingItem) {
                         if ($existingItem['name'] === $finalName && $existingItem['price'] === $price) {
-                            $isDuplicate = true;
-                            break;
+                            $isDuplicate = true; break;
                         }
                     }
                     if (!$isDuplicate) {
@@ -127,19 +132,39 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
                 }
             }
         }
-        $newResults[] = ['file' => $fileName, 'items' => $currentItems];
-        file_put_contents($logFile, "  [SUCCESS] $fileName 处理成功\n", FILE_APPEND);
+
+        // --- データベースへの保存 ---
+        if (!empty($currentItems)) {
+            $sqlR = "INSERT INTO receipts (file_name) OUTPUT INSERTED.id VALUES (?)";
+            $stmtR = sqlsrv_query($conn, $sqlR, array($fileName));
+            if ($stmtR && sqlsrv_fetch($stmtR)) {
+                $receiptId = sqlsrv_get_field($stmtR, 0);
+                foreach ($currentItems as $it) {
+                    $sqlI = "INSERT INTO receipt_items (receipt_id, item_name, price) VALUES (?, ?, ?)";
+                    sqlsrv_query($conn, $sqlI, array($receiptId, $it['name'], $it['price']));
+                }
+                file_put_contents($logFile, "  [DB SUCCESS] $fileName\n", FILE_APPEND);
+            }
+        }
     }
-    
-    // 合并新旧数据并保存
-    $results = array_merge($results, $newResults);
-    file_put_contents($storageFile, json_encode($results, JSON_UNESCAPED_UNICODE));
 }
 
-// 计算累计金额
+// --- 5. 表示用データの読み取り ---
+$results = [];
 $totalAllAmount = 0;
-foreach ($results as $res) {
-    foreach ($res['items'] as $it) { $totalAllAmount += $it['price']; }
+$sqlMain = "SELECT id, file_name FROM receipts ORDER BY processed_at DESC";
+$resMain = sqlsrv_query($conn, $sqlMain);
+if ($resMain) {
+    while ($row = sqlsrv_fetch_array($resMain, SQLSRV_FETCH_ASSOC)) {
+        $items = [];
+        $sqlSub = "SELECT item_name as name, price FROM receipt_items WHERE receipt_id = ?";
+        $resSub = sqlsrv_query($conn, $sqlSub, array($row['id']));
+        while ($it = sqlsrv_fetch_array($resSub, SQLSRV_FETCH_ASSOC)) {
+            $items[] = $it;
+            $totalAllAmount += $it['price'];
+        }
+        $results[] = ['file' => $row['file_name'], 'items' => $items];
+    }
 }
 ?>
 <!DOCTYPE html>
@@ -147,16 +172,15 @@ foreach ($results as $res) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>小票解析汇总系统</title>
+    <title>Azure SQL 小票解析汇总</title>
     <style>
         body { font-family: 'PingFang SC', sans-serif; background: #f4f7f9; padding: 20px; color: #333; }
         .box { max-width: 600px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 8px 30px rgba(0,0,0,0.05); }
-        .card { border-left: 4px solid #2ecc71; background: #fafafa; padding: 15px; margin-bottom: 15px; border-radius: 6px; position: relative; }
+        .card { border-left: 4px solid #2ecc71; background: #fafafa; padding: 15px; margin-bottom: 15px; border-radius: 6px; }
         .row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px dashed #eee; font-size: 14px; }
         .grand-total { margin-top: 25px; padding: 20px; background: #fff5f5; border: 1px solid #ffccc7; border-radius: 10px; text-align: center; }
         .amount-big { font-size: 32px; font-weight: bold; color: #ff4d4f; }
-        .btn-main { width: 100%; padding: 15px; background: #1890ff; color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; transition: 0.3s; }
-        .btn-main:disabled { background: #d9d9d9; cursor: not-allowed; }
+        .btn-main { width: 100%; padding: 15px; background: #1890ff; color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; }
         .nav-bar { margin-top: 25px; display: flex; justify-content: space-around; border-top: 1px solid #eee; padding-top: 15px; }
         .nav-link { font-size: 13px; color: #666; text-decoration: none; padding: 6px 12px; border: 1px solid #ddd; border-radius: 4px; }
         #status { color: #1890ff; text-align: center; margin-top: 10px; font-size: 13px; }
@@ -164,35 +188,30 @@ foreach ($results as $res) {
 </head>
 <body>
     <div class="box">
-        <h2 style="text-align:center; margin-bottom:20px;">📜 小票解析汇总</h2>
+        <h2 style="text-align:center;">📜 小票解析汇总 (SQL版)</h2>
         
         <form id="uploadForm" method="post" enctype="multipart/form-data">
             <input type="file" id="fileInput" name="receipts[]" multiple required style="margin-bottom:20px; width: 100%;">
-            <button type="submit" id="submitBtn" class="btn-main">开始解析并汇总</button>
-            <div id="status" style="display:none;">准备处理中...</div>
+            <button type="submit" id="submitBtn" class="btn-main">开始解析并存入DB</button>
+            <div id="status" style="display:none;">准备中...</div>
         </form>
 
         <?php if ($results): ?>
             <div style="margin-top:30px;">
-                <p style="font-weight:bold; color:#888;">扫描明细：</p>
                 <?php foreach ($results as $res): ?>
                     <div class="card">
-                        <small style="color:#aaa; font-size:11px;">📄 <?= htmlspecialchars($res['file']) ?></small>
-                        <?php if (empty($res['items'])): ?>
-                            <div class="row"><span style="color:#ccc;">未识别到有效商品</span></div>
-                        <?php else: ?>
-                            <?php foreach ($res['items'] as $it): ?>
-                                <div class="row">
-                                    <span><?= htmlspecialchars($it['name']) ?></span>
-                                    <span>¥<?= number_format($it['price']) ?></span>
-                                </div>
-                            <?php endforeach; ?>
-                        <?php endif; ?>
+                        <small style="color:#aaa;">📄 <?= htmlspecialchars($res['file']) ?></small>
+                        <?php foreach ($res['items'] as $it): ?>
+                            <div class="row">
+                                <span><?= htmlspecialchars($it['name']) ?></span>
+                                <span>¥<?= number_format($it['price']) ?></span>
+                            </div>
+                        <?php endforeach; ?>
                     </div>
                 <?php endforeach; ?>
 
                 <div class="grand-total">
-                    <div style="font-size:14px; color:#666;">所有已上传小票累计金额</div>
+                    <div>DB累计金額</div>
                     <div class="amount-big">¥<?= number_format($totalAllAmount) ?></div>
                 </div>
             </div>
@@ -200,8 +219,7 @@ foreach ($results as $res) {
 
         <div class="nav-bar">
             <a href="?action=csv" class="nav-link">📥 导出 CSV</a>
-            <a href="?action=log" class="nav-link" target="_blank">📜 查看日志</a>
-            <a href="?action=clear" class="nav-link" style="color:#ff4d4f; border-color:#ffccc7;" onclick="return confirm('确定要清空所有记录吗？')">🗑️ 清空重置</a>
+            <a href="?action=clear" class="nav-link" style="color:#ff4d4f;" onclick="return confirm('确定清空DB吗？')">🗑️ 清空重置</a>
         </div>
     </div>
 
@@ -218,22 +236,16 @@ foreach ($results as $res) {
 
         const formData = new FormData();
         for (let i = 0; i < files.length; i++) {
-            status.innerText = `正在压缩图片 (${i+1}/${files.length})...`;
+            status.innerText = `正在处理 (${i+1}/${files.length})...`;
             const compressed = await compressImg(files[i]);
             formData.append('receipts[]', compressed, files[i].name);
         }
 
-        status.innerText = "正在解析中，图片较多时请耐心等待...";
         fetch('', { method: 'POST', body: formData })
         .then(r => r.text())
         .then(html => {
-            const parser = new DOMParser();
-            const doc = parser.parseFromString(html, 'text/html');
+            const doc = new DOMParser().parseFromString(html, 'text/html');
             document.body.innerHTML = doc.body.innerHTML;
-        })
-        .catch(err => {
-            alert("解析超时，请尝试单次上传更少的图片。");
-            btn.disabled = false;
         });
     };
 
