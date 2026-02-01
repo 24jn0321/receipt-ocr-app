@@ -118,249 +118,251 @@ if ($results) {
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>小票解析</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>小票解析</title>
+    <style>
+        :root {
+            --bg: #fcfcfd;
+            --accent: #0071e3;
+            --text: #1d1d1f;
+            --text-sub: #86868b;
+            --glass: rgba(255, 255, 255, 0.7);
+            --border: rgba(0, 0, 0, 0.05);
+        }
 
-<style>
-:root {
-    --bg: #f8fafc;
-    --card: #ffffff;
-    --text-main: #0f172a;
-    --text-sub: #64748b;
-    --accent: #2563eb;
-    --border: #e5e7eb;
-}
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #000000;
+                --accent: #0077ed;
+                --text: #f5f5f7;
+                --text-sub: #a1a1a6;
+                --glass: rgba(28, 28, 30, 0.7);
+                --border: rgba(255, 255, 255, 0.1);
+            }
+        }
 
-@media (prefers-color-scheme: dark) {
-:root {
-    --bg: #020617;
-    --card: #020617;
-    --text-main: #e5e7eb;
-    --text-sub: #94a3b8;
-    --accent: #60a5fa;
-    --border: #1e293b;
-}}
+        * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 
-* { box-sizing: border-box; }
+        body {
+            margin: 0;
+            background-color: var(--bg);
+            color: var(--text);
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif;
+            display: flex;
+            justify-content: center;
+            padding: 60px 20px;
+            min-height: 100vh;
+        }
 
-body {
-    margin: 0;
-    padding: 48px 16px;
-    background: var(--bg);
-    color: var(--text-main);
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display",
-        "PingFang SC", "Microsoft YaHei", sans-serif;
-    -webkit-font-smoothing: antialiased;
-}
+        .container {
+            width: 100%;
+            max-width: 480px;
+            animation: fadeIn 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+        }
 
-.app {
-    max-width: 540px;
-    margin: auto;
-    background: var(--card);
-    border-radius: 18px;
-    padding: 44px 36px 52px;
-    box-shadow: 0 30px 80px rgba(0,0,0,.25);
-    animation: fadeUp .6s ease;
-}
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
 
-@keyframes fadeUp {
-    from { opacity: 0; transform: translateY(12px); }
-    to { opacity: 1; transform: none; }
-}
+        /* 头部 */
+        header { text-align: center; margin-bottom: 40px; }
+        header h1 { font-size: 34px; font-weight: 700; letter-spacing: -0.5px; margin: 0; }
+        header p { color: var(--text-sub); font-size: 16px; margin-top: 8px; font-weight: 400; }
 
-/* Header */
-header h1 {
-    font-size: 32px;
-    font-weight: 700;
-    margin: 0;
-}
-header p {
-    margin-top: 6px;
-    font-size: 14px;
-    color: var(--text-sub);
-}
+        /* 玻璃容器 */
+        .glass-panel {
+            background: var(--glass);
+            backdrop-filter: blur(20px) saturate(180%);
+            -webkit-backdrop-filter: blur(20px) saturate(180%);
+            border: 1px solid var(--border);
+            border-radius: 28px;
+            padding: 32px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.04);
+        }
 
-/* Upload */
-.upload-box {
-    margin-top: 36px;
-    padding: 26px;
-    border-radius: 14px;
-    border: 1.5px dashed var(--border);
-    text-align: center;
-    cursor: pointer;
-    transition: .3s;
-}
-.upload-box.drag {
-    background: rgba(96,165,250,.08);
-    border-color: var(--accent);
-}
-.upload-box strong {
-    display: block;
-    font-size: 16px;
-}
-.upload-box span {
-    font-size: 13px;
-    color: var(--text-sub);
-}
+        /* 上传交互区 */
+        .upload-zone {
+            position: relative;
+            background: rgba(0,0,0,0.02);
+            border-radius: 20px;
+            padding: 40px 20px;
+            text-align: center;
+            transition: all 0.3s ease;
+            border: 1px solid transparent;
+        }
+        .upload-zone:active { transform: scale(0.98); }
+        .upload-zone.drag { background: rgba(0, 113, 227, 0.05); border-color: var(--accent); }
+        
+        .upload-zone i { font-style: normal; font-size: 40px; display: block; margin-bottom: 12px; }
+        .upload-zone b { font-size: 17px; font-weight: 600; display: block; color: var(--text); }
+        .upload-zone span { font-size: 14px; color: var(--text-sub); margin-top: 4px; display: block; }
 
-.btn {
-    margin-top: 22px;
-    width: 100%;
-    padding: 16px;
-    font-size: 15px;
-    border-radius: 12px;
-    border: none;
-    background: linear-gradient(180deg, #2563eb, #1e40af);
-    color: white;
-    cursor: pointer;
-    transition: .2s;
-}
-.btn:hover { transform: translateY(-1px); }
-.btn:disabled {
-    background: #334155;
-    cursor: not-allowed;
-}
+        /* 按钮 */
+        .btn-primary {
+            margin-top: 24px;
+            width: 100%;
+            padding: 18px;
+            background: var(--accent);
+            color: white;
+            border: none;
+            border-radius: 16px;
+            font-size: 17px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .btn-primary:hover { box-shadow: 0 10px 20px rgba(0, 113, 227, 0.3); opacity: 0.95; }
+        .btn-primary:disabled { background: var(--text-sub); opacity: 0.5; transform: none; }
 
-/* Status */
-#status {
-    margin-top: 14px;
-    font-size: 13px;
-    text-align: center;
-    color: var(--accent);
-}
+        /* 识别结果明细 */
+        .result-list { margin-top: 32px; border-top: 1px solid var(--border); padding-top: 10px; }
+        .item-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 16px 0;
+            border-bottom: 1px solid var(--border);
+            animation: slideIn 0.5s ease forwards;
+        }
+        @keyframes slideIn { from { opacity: 0; transform: translateX(-10px); } to { opacity: 1; transform: translateX(0); } }
 
-/* Skeleton */
-.skeleton {
-    margin-top: 40px;
-}
-.sk-row {
-    height: 16px;
-    background: linear-gradient(
-        90deg,
-        var(--border),
-        rgba(255,255,255,.2),
-        var(--border)
-    );
-    background-size: 200% 100%;
-    animation: shimmer 1.2s infinite;
-    border-radius: 6px;
-    margin-bottom: 14px;
-}
-@keyframes shimmer {
-    from { background-position: 200% 0; }
-    to { background-position: -200% 0; }
-}
+        .item-info .name { display: block; font-size: 16px; font-weight: 500; }
+        .item-info .file { font-size: 12px; color: var(--text-sub); }
+        .item-price { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
 
-/* Result */
-.item {
-    display: flex;
-    justify-content: space-between;
-    padding: 14px 0;
-    border-bottom: 1px solid rgba(255,255,255,.04);
-}
-.price {
-    font-family: "SF Mono", Consolas, monospace;
-}
+        /* 合计 */
+        .total-section {
+            margin-top: 40px;
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+        }
+        .total-label { font-size: 18px; font-weight: 600; color: var(--text-sub); }
+        .total-val { font-size: 48px; font-weight: 700; letter-spacing: -2px; }
+        .total-val small { font-size: 24px; margin-right: 4px; font-weight: 500; }
 
-.total {
-    margin-top: 60px;
-    padding-top: 24px;
-    border-top: 1px solid var(--border);
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-end;
-}
-.total strong {
-    font-size: 44px;
-}
-.footer {
-    margin-top: 48px;
-    text-align: center;
-}
-.footer a {
-    color: var(--text-sub);
-    text-decoration: none;
-    font-size: 13px;
-    margin: 0 12px;
-}
-.footer a:hover { color: var(--text-main); }
-</style>
+        /* 页脚 */
+        footer {
+            margin-top: 40px;
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+        }
+        footer a {
+            font-size: 14px;
+            text-decoration: none;
+            color: var(--accent);
+            font-weight: 500;
+        }
+
+        #status {
+            text-align: center;
+            margin-top: 16px;
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--accent);
+            min-height: 20px;
+        }
+    </style>
 </head>
 
 <body>
-<div class="app">
+<div class="container">
 
-<header>
-    <h1>小票解析</h1>
-    <p>Intelligence in simplicity.</p>
-</header>
+    <header>
+        <h1>小票解析</h1>
+        <p>Intelligence in simplicity.</p>
+    </header>
 
-<form id="uploadForm" enctype="multipart/form-data">
-<label class="upload-box" id="drop">
-    <input type="file" id="fileInput" name="receipts[]" multiple hidden>
-    <strong>拖拽或点击上传小票</strong>
-    <span>自动压缩 · OCR 解析 · 汇总</span>
-</label>
-<button class="btn" id="btn">开始解析</button>
-<div id="status"></div>
-</form>
+    <div class="glass-panel">
+        <form id="uploadForm">
+            <label class="upload-zone" id="dropArea">
+                <input type="file" id="fileInput" name="receipts[]" multiple hidden>
+                <i>📄</i>
+                <b>选取或拖入小票</b>
+                <span>支持多张图片识别</span>
+            </label>
+            <button class="btn-primary" id="submitBtn">开始智能分析</button>
+            <div id="status"></div>
+        </form>
 
-<?php if ($results): ?>
-<?php foreach ($results as $res): ?>
-<?php foreach ($res['items'] as $it): ?>
-<div class="item">
-    <span><?= htmlspecialchars($it['name']) ?></span>
-    <span class="price">¥<?= number_format($it['price']) ?></span>
-</div>
-<?php endforeach; ?>
-<?php endforeach; ?>
+        <?php if ($results): ?>
+        <div class="result-list">
+            <?php foreach ($results as $res): ?>
+                <?php foreach ($res['items'] as $it): ?>
+                <div class="item-row">
+                    <div class="item-info">
+                        <span class="name"><?= htmlspecialchars($it['name']) ?></span>
+                        <span class="file"><?= htmlspecialchars($res['file']) ?></span>
+                    </div>
+                    <div class="item-price">¥<?= number_format($it['price']) ?></div>
+                </div>
+                <?php endforeach; ?>
+            <?php endforeach; ?>
+        </div>
 
-<div class="total">
-    <span>合计</span>
-    <strong>¥<?= number_format($totalAllAmount) ?></strong>
-</div>
-<?php endif; ?>
+        <div class="total-section">
+            <span class="total-label">合计</span>
+            <div class="total-val"><small>¥</small><?= number_format($totalAllAmount) ?></div>
+        </div>
+        <?php endif; ?>
+    </div>
 
-<div class="footer">
-    <a href="?action=csv">CSV 导出</a>
-    <a href="?action=log">运行日志</a>
-</div>
+    <footer>
+        <a href="?action=csv">CSV 导出数据</a>
+        <a href="?action=log">开发者日志</a>
+    </footer>
 
 </div>
 
 <script>
-const drop = document.getElementById('drop');
-const input = document.getElementById('fileInput');
-const status = document.getElementById('status');
-const btn = document.getElementById('btn');
+    const dropArea = document.getElementById('dropArea');
+    const fileInput = document.getElementById('fileInput');
+    const submitBtn = document.getElementById('submitBtn');
+    const status = document.getElementById('status');
 
-drop.onclick = () => input.click();
+    // 交互动画
+    ['dragenter', 'dragover'].forEach(name => {
+        dropArea.addEventListener(name, (e) => {
+            e.preventDefault();
+            dropArea.classList.add('drag');
+        });
+    });
 
-['dragenter','dragover'].forEach(e =>
-    drop.addEventListener(e, ev => {
-        ev.preventDefault();
-        drop.classList.add('drag');
-    })
-);
-['dragleave','drop'].forEach(e =>
-    drop.addEventListener(e, () => drop.classList.remove('drag'))
-);
-drop.ondrop = e => {
-    e.preventDefault();
-    input.files = e.dataTransfer.files;
-};
+    ['dragleave', 'drop'].forEach(name => {
+        dropArea.addEventListener(name, () => dropArea.classList.remove('drag'));
+    });
 
-document.getElementById('uploadForm').onsubmit = async e => {
-    e.preventDefault();
-    btn.disabled = true;
-    status.innerText = "解析中…";
-    const fd = new FormData();
-    for (let f of input.files) fd.append('receipts[]', f, f.name);
-    const r = await fetch('', { method: 'POST', body: fd });
-    document.body.innerHTML =
-        new DOMParser().parseFromString(await r.text(), 'text/html').body.innerHTML;
-};
+    dropArea.addEventListener('drop', (e) => {
+        e.preventDefault();
+        fileInput.files = e.dataTransfer.files;
+        status.innerText = `已准备 ${fileInput.files.length} 张图片`;
+    });
+
+    document.getElementById('uploadForm').onsubmit = async (e) => {
+        e.preventDefault();
+        if (fileInput.files.length === 0) return alert('请先选择文件');
+
+        submitBtn.disabled = true;
+        status.innerText = "正在进行 OCR 云端识别...";
+
+        const fd = new FormData();
+        for (let f of fileInput.files) fd.append('receipts[]', f, f.name);
+
+        try {
+            const r = await fetch('', { method: 'POST', body: fd });
+            const html = await r.text();
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(html, 'text/html');
+            document.body.innerHTML = doc.body.innerHTML;
+            // 重新绑定事件（如果是局部刷新）
+        } catch (err) {
+            status.innerText = "解析出错，请重试";
+            submitBtn.disabled = false;
+        }
+    };
 </script>
 </body>
 </html>
