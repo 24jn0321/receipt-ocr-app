@@ -123,187 +123,155 @@ if ($results) {
     <title>小票解析</title>
     <style>
         :root {
-            --bg: #fcfcfd;
-            --accent: #0071e3;
-            --text: #1d1d1f;
-            --text-sub: #86868b;
-            --glass: rgba(255, 255, 255, 0.7);
-            --border: rgba(0, 0, 0, 0.05);
+            --accent: #007AFF;
+            --bg: #F2F2F7;
+            --card: #FFFFFF;
+            --text: #1C1C1E;
+            --text-sub: #8E8E93;
+            --border: #E5E5EA;
         }
 
         @media (prefers-color-scheme: dark) {
             :root {
                 --bg: #000000;
-                --accent: #0077ed;
-                --text: #f5f5f7;
-                --text-sub: #a1a1a6;
-                --glass: rgba(28, 28, 30, 0.7);
-                --border: rgba(255, 255, 255, 0.1);
+                --card: #1C1C1E;
+                --text: #FFFFFF;
+                --text-sub: #8E8E93;
+                --border: #38383A;
             }
         }
 
-        * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-
         body {
             margin: 0;
+            padding: 40px 20px;
             background-color: var(--bg);
             color: var(--text);
-            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif;
-            display: flex;
-            justify-content: center;
-            padding: 60px 20px;
-            min-height: 100vh;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            -webkit-font-smoothing: antialiased;
         }
 
         .container {
-            width: 100%;
-            max-width: 480px;
-            animation: fadeIn 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+            max-width: 400px;
+            margin: 0 auto;
         }
 
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(20px); }
-            to { opacity: 1; transform: translateY(0); }
+        /* 紧凑型头部 */
+        header {
+            margin-bottom: 24px;
+        }
+        header h1 {
+            font-size: 20px;
+            font-weight: 600;
+            margin: 0;
+            letter-spacing: -0.5px;
         }
 
-        /* 头部 */
-        header { text-align: center; margin-bottom: 40px; }
-        header h1 { font-size: 34px; font-weight: 700; letter-spacing: -0.5px; margin: 0; }
-        header p { color: var(--text-sub); font-size: 16px; margin-top: 8px; font-weight: 400; }
-
-        /* 玻璃容器 */
-        .glass-panel {
-            background: var(--glass);
-            backdrop-filter: blur(20px) saturate(180%);
-            -webkit-backdrop-filter: blur(20px) saturate(180%);
-            border: 1px solid var(--border);
-            border-radius: 28px;
-            padding: 32px;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.04);
+        /* 结果容器 */
+        .glass-card {
+            background: var(--card);
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.05);
         }
 
-        /* 上传交互区 */
-        .upload-zone {
-            position: relative;
-            background: rgba(0,0,0,0.02);
-            border-radius: 20px;
-            padding: 40px 20px;
-            text-align: center;
-            transition: all 0.3s ease;
-            border: 1px solid transparent;
+        /* 精致上传框 */
+        .upload-trigger {
+            width: 80px;
+            height: 80px;
+            background: var(--bg);
+            border: 1px dashed var(--border);
+            border-radius: 12px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: 0.2s;
+            margin-bottom: 20px;
         }
-        .upload-zone:active { transform: scale(0.98); }
-        .upload-zone.drag { background: rgba(0, 113, 227, 0.05); border-color: var(--accent); }
-        
-        .upload-zone i { font-style: normal; font-size: 40px; display: block; margin-bottom: 12px; }
-        .upload-zone b { font-size: 17px; font-weight: 600; display: block; color: var(--text); }
-        .upload-zone span { font-size: 14px; color: var(--text-sub); margin-top: 4px; display: block; }
+        .upload-trigger:hover { border-color: var(--accent); background: rgba(0,122,255,0.05); }
+        .upload-trigger svg { width: 24px; height: 24px; fill: var(--text-sub); margin-bottom: 4px; }
+        .upload-trigger span { font-size: 11px; color: var(--text-sub); }
 
         /* 按钮 */
-        .btn-primary {
-            margin-top: 24px;
+        .btn-action {
             width: 100%;
-            padding: 18px;
             background: var(--accent);
             color: white;
             border: none;
-            border-radius: 16px;
-            font-size: 17px;
-            font-weight: 600;
+            padding: 12px;
+            border-radius: 10px;
+            font-size: 15px;
+            font-weight: 500;
             cursor: pointer;
-            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
         }
-        .btn-primary:hover { box-shadow: 0 10px 20px rgba(0, 113, 227, 0.3); opacity: 0.95; }
-        .btn-primary:disabled { background: var(--text-sub); opacity: 0.5; transform: none; }
+        .btn-action:disabled { opacity: 0.4; }
 
-        /* 识别结果明细 */
-        .result-list { margin-top: 32px; border-top: 1px solid var(--border); padding-top: 10px; }
-        .item-row {
+        /* 明细列表 */
+        .list { margin-top: 24px; border-top: 1px solid var(--border); }
+        .row {
             display: flex;
             justify-content: space-between;
-            align-items: center;
-            padding: 16px 0;
-            border-bottom: 1px solid var(--border);
-            animation: slideIn 0.5s ease forwards;
+            padding: 12px 0;
+            border-bottom: 0.5px solid var(--border);
+            font-size: 14px;
         }
-        @keyframes slideIn { from { opacity: 0; transform: translateX(-10px); } to { opacity: 1; transform: translateX(0); } }
+        .name { color: var(--text); flex: 1; padding-right: 10px; }
+        .price { font-weight: 600; font-variant-numeric: tabular-nums; }
 
-        .item-info .name { display: block; font-size: 16px; font-weight: 500; }
-        .item-info .file { font-size: 12px; color: var(--text-sub); }
-        .item-price { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
-
-        /* 合计 */
-        .total-section {
-            margin-top: 40px;
+        /* 合计栏 */
+        .total-bar {
+            margin-top: 24px;
             display: flex;
             justify-content: space-between;
             align-items: baseline;
         }
-        .total-label { font-size: 18px; font-weight: 600; color: var(--text-sub); }
-        .total-val { font-size: 48px; font-weight: 700; letter-spacing: -2px; }
-        .total-val small { font-size: 24px; margin-right: 4px; font-weight: 500; }
+        .total-label { font-size: 14px; font-weight: 500; color: var(--text-sub); }
+        .total-val { font-size: 28px; font-weight: 700; }
+        .total-val small { font-size: 16px; margin-right: 2px; }
 
-        /* 页脚 */
         footer {
-            margin-top: 40px;
-            display: flex;
-            justify-content: center;
-            gap: 20px;
-        }
-        footer a {
-            font-size: 14px;
-            text-decoration: none;
-            color: var(--accent);
-            font-weight: 500;
-        }
-
-        #status {
+            margin-top: 32px;
             text-align: center;
-            margin-top: 16px;
-            font-size: 14px;
-            font-weight: 500;
-            color: var(--accent);
-            min-height: 20px;
+            font-size: 12px;
         }
+        footer a { color: var(--accent); text-decoration: none; margin: 0 8px; }
+
+        #status { font-size: 12px; color: var(--accent); margin-top: 10px; text-align: center; }
     </style>
 </head>
-
 <body>
-<div class="container">
 
+<div class="container">
     <header>
         <h1>小票解析</h1>
-        <p>Intelligence in simplicity.</p>
     </header>
 
-    <div class="glass-panel">
+    <div class="glass-card">
         <form id="uploadForm">
-            <label class="upload-zone" id="dropArea">
+            <label class="upload-trigger">
                 <input type="file" id="fileInput" name="receipts[]" multiple hidden>
-                <i>📄</i>
-                <b>选取或拖入小票</b>
-                <span>支持多张图片识别</span>
+                <svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+                <span>选照片</span>
             </label>
-            <button class="btn-primary" id="submitBtn">开始智能分析</button>
+            
+            <button type="submit" class="btn-action" id="subBtn">开始解析</button>
             <div id="status"></div>
         </form>
 
         <?php if ($results): ?>
-        <div class="result-list">
+        <div class="list">
             <?php foreach ($results as $res): ?>
                 <?php foreach ($res['items'] as $it): ?>
-                <div class="item-row">
-                    <div class="item-info">
-                        <span class="name"><?= htmlspecialchars($it['name']) ?></span>
-                        <span class="file"><?= htmlspecialchars($res['file']) ?></span>
-                    </div>
-                    <div class="item-price">¥<?= number_format($it['price']) ?></div>
+                <div class="row">
+                    <span class="name"><?= htmlspecialchars($it['name']) ?></span>
+                    <span class="price">¥<?= number_format($it['price']) ?></span>
                 </div>
                 <?php endforeach; ?>
             <?php endforeach; ?>
         </div>
 
-        <div class="total-section">
+        <div class="total-bar">
             <span class="total-label">合计</span>
             <div class="total-val"><small>¥</small><?= number_format($totalAllAmount) ?></div>
         </div>
@@ -311,60 +279,34 @@ if ($results) {
     </div>
 
     <footer>
-        <a href="?action=csv">CSV 导出数据</a>
-        <a href="?action=log">开发者日志</a>
+        <a href="?action=csv">导出数据</a>
+        <a href="?action=log">日志</a>
     </footer>
-
 </div>
 
 <script>
-    const dropArea = document.getElementById('dropArea');
-    const fileInput = document.getElementById('fileInput');
-    const submitBtn = document.getElementById('submitBtn');
+    const input = document.getElementById('fileInput');
     const status = document.getElementById('status');
+    const btn = document.getElementById('subBtn');
 
-    // 交互动画
-    ['dragenter', 'dragover'].forEach(name => {
-        dropArea.addEventListener(name, (e) => {
-            e.preventDefault();
-            dropArea.classList.add('drag');
-        });
-    });
+    input.onchange = () => {
+        status.innerText = `已选 ${input.files.length} 张图片`;
+    };
 
-    ['dragleave', 'drop'].forEach(name => {
-        dropArea.addEventListener(name, () => dropArea.classList.remove('drag'));
-    });
-
-    dropArea.addEventListener('drop', (e) => {
+    document.getElementById('uploadForm').onsubmit = async e => {
         e.preventDefault();
-        fileInput.files = e.dataTransfer.files;
-        status.innerText = `已准备 ${fileInput.files.length} 张图片`;
-    });
-
-    document.getElementById('uploadForm').onsubmit = async (e) => {
-        e.preventDefault();
-        if (fileInput.files.length === 0) return alert('请先选择文件');
-
-        submitBtn.disabled = true;
-        status.innerText = "正在进行 OCR 云端识别...";
-
+        if(!input.files.length) return;
+        btn.disabled = true;
+        status.innerText = "识别中...";
+        
         const fd = new FormData();
-        for (let f of fileInput.files) fd.append('receipts[]', f, f.name);
-
-        try {
-            const r = await fetch('', { method: 'POST', body: fd });
-            const html = await r.text();
-            const parser = new DOMParser();
-            const doc = parser.parseFromString(html, 'text/html');
-            document.body.innerHTML = doc.body.innerHTML;
-            // 重新绑定事件（如果是局部刷新）
-        } catch (err) {
-            status.innerText = "解析出错，请重试";
-            submitBtn.disabled = false;
-        }
+        for (let f of input.files) fd.append('receipts[]', f, f.name);
+        
+        const r = await fetch('', { method: 'POST', body: fd });
+        const html = await r.text();
+        document.body.innerHTML = new DOMParser().parseFromString(html, 'text/html').body.innerHTML;
     };
 </script>
+
 </body>
 </html>
-
-
