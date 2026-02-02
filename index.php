@@ -225,7 +225,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && !empty($processedIds)) {
 </head>
 <body>
     <div class="box">
-        <h2 style="text-align:center;">📜 レシート解析 (今回の結果のみ)</h2>
+        <h2 style="text-align:center;">📜 レシート解析 </h2>
         <form id="uploadForm" method="post" enctype="multipart/form-data">
             <input type="file" id="fileInput" name="receipts[]" multiple required style="margin-bottom:20px; width: 100%;">
             <button type="submit" id="submitBtn" class="btn-main">解析を開始してDBに保存</button>
@@ -247,15 +247,15 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && !empty($processedIds)) {
                     </div>
                 <?php endforeach; ?>
                 <div class="grand-total">
-                    <div>今回の解析 合計金額</div>
+                    <div>合計金額</div>
                     <div class="amount-big">¥<?= number_format($totalAllAmount) ?></div>
                 </div>
             </div>
         <?php endif; ?>
 
         <div class="nav-bar">
-            <a href="?action=csv" class="nav-link">📥 CSV出力</a>
-            <a href="?action=download_log" class="nav-link">📝 ログを保存</a>
+            <a href="?action=csv" class="nav-link">📥 CSVをダウンロード</a>
+            <a href="?action=download_log" class="nav-link">📝 ログをダウンロード</a>
             <a href="?action=clear_view" class="nav-link" style="color:#1890ff;">🔄 表示をクリア</a>
         </div>
     </div>
@@ -312,3 +312,4 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && !empty($processedIds)) {
     </script>
 </body>
 </html>
+
