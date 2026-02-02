@@ -4,6 +4,7 @@
  * 修改说明：
  * 1. 允许显示并保存带有 "◎" 符号的商品名。
  * 2. 移除数据库删除功能，改为“清空页面显示”。
+ * 3. 增强日志功能：将 OCR 原始结果以易読格式写入 ocr.log
  */
 
 // --- 1. 配置与環境設置 ---
@@ -54,7 +55,7 @@ if (isset($_GET['action'])) {
         }
     }
 
-    // 清空页面显示（重定向到不带 POST 数据的 URL）
+    // 清空页面显示
     if ($action == 'clear_view') {
         header("Location: " . strtok($_SERVER["PHP_SELF"], '?')); 
         exit;
@@ -64,7 +65,7 @@ if (isset($_GET['action'])) {
 // --- 4. OCR 核心解析逻辑 ---
 $processedIds = []; 
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
-    file_put_contents($logFile, "\n[" . date('Y-m-d H:i:s') . "] --- 开始識別任務 ---\n", FILE_APPEND);
+    file_put_contents($logFile, "\n[" . date('Y-m-d H:i:s') . "] === START NEW BATCH ===\n", FILE_APPEND);
     
     foreach ($_FILES['receipts']['tmp_name'] as $key => $tmpName) {
         if (empty($tmpName)) continue;
@@ -86,14 +87,21 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
 
-        if ($httpCode !== 200) {
-            file_put_contents($logFile, "  [ERROR] $fileName 请求失敗: HTTP $httpCode\n", FILE_APPEND);
-            continue; 
+        // --- 強化されたログ出力 ---
+        $logEntry = "[" . date('H:i:s') . "] File: $fileName | HTTP: $httpCode\n";
+        if ($httpCode === 200) {
+            $respObj = json_decode($response);
+            // JSONを読みやすく整形 (日本語/中国語もそのまま表示)
+            $prettyJson = json_encode($respObj, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+            $logEntry .= "OCR Result JSON:\n$prettyJson\n";
+        } else {
+            $logEntry .= "Error Response: $response\n";
         }
+        $logEntry .= "------------------------------------------\n";
+        file_put_contents($logFile, $logEntry, FILE_APPEND);
+        // -----------------------
 
-        // --- 追加: 検証用にOCR結果をログに書き込む ---
-        file_put_contents($logFile, "  [DATA] $fileName OCR Result:\n$response\n", FILE_APPEND);
-        // ----------------------------------------
+        if ($httpCode !== 200) continue;
 
         $data = json_decode($response, true);
         $lines = $data['readResult']['blocks'][0]['lines'] ?? [];
@@ -102,7 +110,6 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
 
         for ($i = 0; $i < count($lines); $i++) {
             $text = trim($lines[$i]['text']);
-            // 【修改】此处不移除 ◎ 
             $pureText = str_replace([' ', '　', '＊', '*', '√', '軽', '轻', '(', ')', '8%', '10%'], '', $text);
 
             if (preg_match('/合計|合计|内消費税|消費税|対象|支払|残高|再発行/u', $pureText)) {
@@ -114,14 +121,12 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
             if (preg_match('/[¥￥]([\d,]+)/u', $text, $matches)) {
                 $price = (int)str_replace(',', '', $matches[1]);
                 $nameInLine = trim(preg_replace('/[\.．…]+|[¥￥].*$/u', '', $text));
-                // 【修改】从清洗列表中移除 ◎，确保商品名能带这个符号
                 $cleanNameInLine = str_replace(['＊', '*', '轻', '軽', '(', ')', '.', '．', ' '], '', $nameInLine);
 
                 if (mb_strlen($cleanNameInLine) < 2 || preg_match('/^[¥￥\d,\s]+$/u', $cleanNameInLine)) {
                     $foundName = "";
                     for ($j = $i - 1; $j >= 0; $j--) {
                         $prev = trim($lines[$j]['text']);
-                        // 【修改】此处同样移除 ◎ 的过滤
                         $cleanPrev = str_replace(['＊', '*', ' ', '√', '軽', '轻'], '', $prev);
                         if (mb_strlen($cleanPrev) >= 2 && !preg_match('/領|収|証|合|计|計|%|店|电话|電話|¥|￥/u', $cleanPrev)) {
                             $foundName = $cleanPrev; break;
@@ -281,7 +286,6 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && !empty($processedIds)) {
                 img.onload = () => {
                     const canvas = document.createElement('canvas');
                     let w = img.width, h = img.height;
-                    // 限制最大宽度，提高解析效率
                     if (w > 1200) { h = h * (1200/w); w = 1200; }
                     canvas.width = w; canvas.height = h;
                     canvas.getContext('2d').drawImage(img, 0, 0, w, h);
