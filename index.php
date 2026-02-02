@@ -91,6 +91,10 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
             continue; 
         }
 
+        // --- 追加: 検証用にOCR結果をログに書き込む ---
+        file_put_contents($logFile, "  [DATA] $fileName OCR Result:\n$response\n", FILE_APPEND);
+        // ----------------------------------------
+
         $data = json_decode($response, true);
         $lines = $data['readResult']['blocks'][0]['lines'] ?? [];
         $currentItems = [];
@@ -289,4 +293,3 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && !empty($processedIds)) {
     </script>
 </body>
 </html>
-
