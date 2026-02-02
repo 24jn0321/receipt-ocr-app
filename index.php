@@ -4,7 +4,7 @@
  * 修改说明：
  * 1. 允许显示并保存带有 "◎" 符号的商品名。
  * 2. 移除数据库删除功能，改为“清空页面显示”。
- * 3. 增强日志功能：将 OCR 原始结果以易読格式写入 ocr.log
+ * 3. 增强日志功能：按照指定格式 [STORE/TOTAL/ITEM] 写入 ocr.log
  */
 
 // --- 1. 配置与環境設置 ---
@@ -32,7 +32,6 @@ if ($conn === false) {
 if (isset($_GET['action'])) {
     $action = $_GET['action'];
     
-    // 导出 CSV 功能
     if ($action == 'csv') {
         header('Content-Type: text/csv; charset=utf-8');
         header('Content-Disposition: attachment; filename=receipt_export_'.date('Ymd').'.csv');
@@ -55,7 +54,6 @@ if (isset($_GET['action'])) {
         }
     }
 
-    // 清空页面显示
     if ($action == 'clear_view') {
         header("Location: " . strtok($_SERVER["PHP_SELF"], '?')); 
         exit;
@@ -65,8 +63,6 @@ if (isset($_GET['action'])) {
 // --- 4. OCR 核心解析逻辑 ---
 $processedIds = []; 
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
-    file_put_contents($logFile, "\n[" . date('Y-m-d H:i:s') . "] === START NEW BATCH ===\n", FILE_APPEND);
-    
     foreach ($_FILES['receipts']['tmp_name'] as $key => $tmpName) {
         if (empty($tmpName)) continue;
         if ($key > 0) sleep(1);
@@ -87,32 +83,32 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
 
-        // --- 強化されたログ出力 ---
-        $logEntry = "[" . date('H:i:s') . "] File: $fileName | HTTP: $httpCode\n";
-        if ($httpCode === 200) {
-            $respObj = json_decode($response);
-            // JSONを読みやすく整形 (日本語/中国語もそのまま表示)
-            $prettyJson = json_encode($respObj, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
-            $logEntry .= "OCR Result JSON:\n$prettyJson\n";
-        } else {
-            $logEntry .= "Error Response: $response\n";
-        }
-        $logEntry .= "------------------------------------------\n";
-        file_put_contents($logFile, $logEntry, FILE_APPEND);
-        // -----------------------
-
         if ($httpCode !== 200) continue;
 
         $data = json_decode($response, true);
         $lines = $data['readResult']['blocks'][0]['lines'] ?? [];
         $currentItems = [];
         $stopFlag = false;
+        
+        // 日志用の変数
+        $logStore = "Unknown";
+        $logTotal = 0;
 
         for ($i = 0; $i < count($lines); $i++) {
             $text = trim($lines[$i]['text']);
+            
+            // 店舗名の推測 (最初の数行から)
+            if ($i < 5 && preg_match('/FamilyMart|セブン|ローソン|LAWSON/i', $text, $storeMatch)) {
+                $logStore = $storeMatch[0];
+            }
+
             $pureText = str_replace([' ', '　', '＊', '*', '√', '軽', '轻', '(', ')', '8%', '10%'], '', $text);
 
-            if (preg_match('/合計|合计|内消費税|消費税|対象|支払|残高|再発行/u', $pureText)) {
+            if (preg_match('/合計|合计/u', $pureText) && preg_match('/[¥￥]([\d,]+)/u', $text, $totalMatch)) {
+                $logTotal = (float)str_replace(',', '', $totalMatch[1]);
+            }
+
+            if (preg_match('/内消費税|消費税|対象|支払|残高|再発行/u', $pureText)) {
                 if (!empty($currentItems)) $stopFlag = true; 
                 continue; 
             }
@@ -150,6 +146,17 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
                 }
             }
         }
+
+        // --- 指定フォーマットでのログ書き出し ---
+        $logContent = "\n===== OCR RESULT =====\n";
+        $logContent .= "TIME: " . date('Y-m-d\TH:i:s.v') . "\n";
+        $logContent .= "STORE: $logStore\n";
+        $logContent .= "TOTAL: " . number_format($logTotal, 1, '.', '') . "\n";
+        foreach ($currentItems as $it) {
+            $logContent .= "{$it['name']}," . number_format($it['price'], 1, '.', '') . "\n";
+        }
+        file_put_contents($logFile, $logContent, FILE_APPEND);
+        // -------------------------------------
 
         if (!empty($currentItems)) {
             $sqlR = "INSERT INTO receipts (file_name) OUTPUT INSERTED.id VALUES (?)";
