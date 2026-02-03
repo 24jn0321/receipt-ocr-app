@@ -1,7 +1,10 @@
 <?php
 /**
- * 🧾 レシート解析システム - 最终兼容版
- * 解决：不同电脑扫描结果不一致、商品遗漏、相同商品被过滤的问题。
+ * 🧾 レシート解析システム - ページリセット版
+ * 修正内容:
+ * 1. "◎" 記号を含む商品名を表示・保存可能に。
+ * 2. データベース削除機能を廃止し、「表示のリセット」に変更。
+ * 3. ログ機能の強化: [STORE/TOTAL/ITEM] 形式で ocr.log に出力。
  */
 
 // --- 1. 設定と環境構成 ---
@@ -28,10 +31,12 @@ if ($conn === false) {
 // --- 3. アクション処理 ---
 if (isset($_GET['action'])) {
     $action = $_GET['action'];
+    
+    // CSVエクスポート
     if ($action == 'csv') {
         header('Content-Type: text/csv; charset=utf-8');
         header('Content-Disposition: attachment; filename=receipt_export_'.date('Ymd').'.csv');
-        echo "\xEF\xBB\xBF"; 
+        echo "\xEF\xBB\xBF"; // UTF-8 BOM
         $output = fopen('php://output', 'w');
         fputcsv($output, ['ファイル名', '項目', '金額', '日時']);
         $sql = "SELECT r.file_name, r.processed_at, i.item_name, i.price FROM receipts r JOIN receipt_items i ON r.id = i.receipt_id";
@@ -41,6 +46,8 @@ if (isset($_GET['action'])) {
         }
         fclose($output); exit;
     }
+
+    // ログダウンロード
     if ($action == 'download_log') {
         if (file_exists($logFile)) {
             header('Content-Type: text/plain');
@@ -48,6 +55,8 @@ if (isset($_GET['action'])) {
             readfile($logFile); exit;
         }
     }
+
+    // 表示をクリア (リダイレクトしてPOSTデータを破棄)
     if ($action == 'clear_view') {
         header("Location: " . strtok($_SERVER["PHP_SELF"], '?')); 
         exit;
@@ -59,7 +68,7 @@ $processedIds = [];
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
     foreach ($_FILES['receipts']['tmp_name'] as $key => $tmpName) {
         if (empty($tmpName)) continue;
-        if ($key > 0) sleep(1); 
+        if ($key > 0) sleep(1); // API制限回避用の待機
 
         $fileName = $_FILES['receipts']['name'][$key];
         $imgData = file_get_contents($tmpName);
@@ -90,56 +99,73 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
         for ($i = 0; $i < count($lines); $i++) {
             $text = trim($lines[$i]['text']);
             
-            // 店舗推測
-            if ($i < 8 && preg_match('/FamilyMart|セブン|ローソン|LAWSON/i', $text, $storeMatch)) {
+            // 店舗名の推測
+            if ($i < 5 && preg_match('/FamilyMart|セブン|ローソン|LAWSON/i', $text, $storeMatch)) {
                 $logStore = $storeMatch[0];
             }
 
+            // 記号の除去（解析用）
             $pureText = str_replace([' ', '　', '＊', '*', '√', '軽', '轻', '(', ')', '8%', '10%'], '', $text);
 
-            // 合计金额识别
+            // 合計金額の取得
             if (preg_match('/合計|合計額/u', $pureText) && preg_match('/[¥￥]([\d,]+)/u', $text, $totalMatch)) {
                 $logTotal = (float)str_replace(',', '', $totalMatch[1]);
             }
 
-            // 停止词（防止把找零、支付方式识别成商品）
+            // 解析停止ワード
             if (preg_match('/内消費税|消費税|対象|支払|残高|再発行/u', $pureText)) {
                 if (!empty($currentItems)) $stopFlag = true; 
                 continue; 
             }
             if ($stopFlag) continue;
 
-            // 商品和金额解析
+            // 商品と金額の抽出
             if (preg_match('/[¥￥]([\d,]+)/u', $text, $matches)) {
                 $price = (int)str_replace(',', '', $matches[1]);
                 $nameInLine = trim(preg_replace('/[\.．…]+|[¥￥].*$/u', '', $text));
                 
-                // 清洗名称（保留 ◎）
-                $cleanName = str_replace(['＊', '*', '轻', '軽', '(', ')', '.', '．', ' '], '', $nameInLine);
+                // クリーニング (◎ は維持する)
+                $cleanNameInLine = str_replace(['＊', '*', '轻', '軽', '(', ')', '.', '．', ' '], '', $nameInLine);
 
-                // 如果当前行名太短，向上找一行
-                if (mb_strlen($cleanName) < 2 || preg_match('/^[¥￥\d,\s]+$/u', $cleanName)) {
+                if (mb_strlen($cleanNameInLine) < 2 || preg_match('/^[¥￥\d,\s]+$/u', $cleanNameInLine)) {
+                    $foundName = "";
                     for ($j = $i - 1; $j >= 0; $j--) {
-                        $prev = str_replace(['＊', '*', ' ', '√', '軽', '轻'], '', trim($lines[$j]['text']));
-                        if (mb_strlen($prev) >= 2 && !preg_match('/領|収|証|合|計|%|店|電話|¥|￥/u', $prev)) {
-                            $cleanName = $prev; 
-                            break;
+                        $prev = trim($lines[$j]['text']);
+                        $cleanPrev = str_replace(['＊', '*', ' ', '√', '軽', '轻'], '', $prev);
+                        if (mb_strlen($cleanPrev) >= 2 && !preg_match('/領|収|証|合|計|%|店|電話|¥|￥/u', $cleanPrev)) {
+                            $foundName = $cleanPrev; break;
                         }
                     }
+                    $finalName = $foundName;
+                } else {
+                    $finalName = $cleanNameInLine;
                 }
 
-                if (!empty($cleanName) && !preg_match('/Family|新宿|電話|登録|領収|対象|合計|内訳/u', $cleanName)) {
-                    // 【关键：移除了重复检查逻辑，确保别人的电脑也能扫出多个相同商品】
-                    $currentItems[] = ['name' => $cleanName, 'price' => $price];
+                if (!empty($finalName) && !preg_match('/Family|新宿|電話|登録|領収|対象|消費税|合計|内訳/u', $finalName)) {
+                    $isDuplicate = false;
+                    foreach ($currentItems as $existing) {
+                        if ($existing['name'] === $finalName && $existing['price'] === $price) {
+                            $isDuplicate = true; break;
+                        }
+                    }
+                    if (!$isDuplicate) {
+                        $currentItems[] = ['name' => $finalName, 'price' => $price];
+                    }
                 }
             }
         }
 
-        // 写入日志
-        $logEntry = sprintf("[%s] FILE:%s STORE:%s TOTAL:%d ITEMS:%d\n", date('Y-m-d H:i:s'), $fileName, $logStore, $logTotal, count($currentItems));
-        file_put_contents($logFile, $logEntry, FILE_APPEND);
+        // --- ログ書き出し ---
+        $logContent = "\n===== OCR RESULT =====\n";
+        $logContent .= "TIME: " . date('Y-m-d\TH:i:s.v') . "\n";
+        $logContent .= "STORE: $logStore\n";
+        $logContent .= "TOTAL: " . number_format($logTotal, 1, '.', '') . "\n";
+        foreach ($currentItems as $it) {
+            $logContent .= "{$it['name']}," . number_format($it['price'], 1, '.', '') . "\n";
+        }
+        file_put_contents($logFile, $logContent, FILE_APPEND);
 
-        // 存入数据库
+        // データベース保存
         if (!empty($currentItems)) {
             $sqlR = "INSERT INTO receipts (file_name) OUTPUT INSERTED.id VALUES (?)";
             $stmtR = sqlsrv_query($conn, $sqlR, array($fileName));
@@ -155,11 +181,12 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
     }
 }
 
-// --- 5. 获取结果显示 ---
+// --- 5. 表示用データの読み取り ---
 $results = [];
 $totalAllAmount = 0;
-if (!empty($processedIds)) {
-    $idList = implode(',', array_map('intval', $processedIds));
+
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && !empty($processedIds)) {
+    $idList = implode(',', $processedIds);
     $sqlMain = "SELECT id, file_name FROM receipts WHERE id IN ($idList)";
     $resMain = sqlsrv_query($conn, $sqlMain);
     if ($resMain) {
@@ -181,32 +208,36 @@ if (!empty($processedIds)) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>レシート解析システム (稳定版)</title>
+    <title>レシート解析システム (Azure SQL)</title>
     <style>
-        body { font-family: sans-serif; background: #f4f7f9; padding: 20px; }
-        .box { max-width: 600px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
-        .card { border-left: 4px solid #2ecc71; background: #fafafa; padding: 10px; margin-bottom: 10px; }
-        .row { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px dashed #ddd; }
-        .amount-big { font-size: 28px; font-weight: bold; color: #ff4d4f; text-align: center; }
-        .btn-main { width: 100%; padding: 15px; background: #1890ff; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; }
-        .nav-bar { margin-top: 20px; display: flex; gap: 10px; justify-content: center; }
-        .nav-link { font-size: 12px; color: #666; text-decoration: none; border: 1px solid #ccc; padding: 5px 10px; border-radius: 4px; }
+        body { font-family: 'Helvetica Neue', Arial, sans-serif; background: #f4f7f9; padding: 20px; color: #333; }
+        .box { max-width: 600px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 8px 30px rgba(0,0,0,0.05); }
+        .card { border-left: 4px solid #2ecc71; background: #fafafa; padding: 15px; margin-bottom: 15px; border-radius: 6px; }
+        .row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px dashed #eee; font-size: 14px; }
+        .grand-total { margin-top: 25px; padding: 20px; background: #fff5f5; border: 1px solid #ffccc7; border-radius: 10px; text-align: center; }
+        .amount-big { font-size: 32px; font-weight: bold; color: #ff4d4f; }
+        .btn-main { width: 100%; padding: 15px; background: #1890ff; color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; }
+        .btn-main:disabled { background: #ccc; }
+        .nav-bar { margin-top: 25px; display: flex; justify-content: space-around; border-top: 1px solid #eee; padding-top: 15px; flex-wrap: wrap; gap: 10px; }
+        .nav-link { font-size: 12px; color: #666; text-decoration: none; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; background: #fff; }
+        .nav-link:hover { background: #f9f9f9; }
     </style>
 </head>
 <body>
     <div class="box">
-        <h2 style="text-align:center;">📜 レシート解析</h2>
+        <h2 style="text-align:center;">📜 レシート解析 </h2>
         <form id="uploadForm" method="post" enctype="multipart/form-data">
-            <input type="file" id="fileInput" name="receipts[]" multiple required style="width:100%; margin-bottom:15px;">
-            <button type="submit" id="submitBtn" class="btn-main">解析を開始</button>
-            <div id="status" style="display:none; text-align:center; margin-top:10px; color:#1890ff;">処理中...</div>
+            <input type="file" id="fileInput" name="receipts[]" multiple required style="margin-bottom:20px; width: 100%;">
+            <button type="submit" id="submitBtn" class="btn-main">解析を開始してDBに保存</button>
+            <div id="status" style="display:none; text-align:center; margin-top:10px; color:#1890ff;">準備中...</div>
         </form>
 
         <?php if ($results): ?>
-            <div style="margin-top:20px;">
+            <div style="margin-top:30px;">
+                <h3 style="font-size: 16px; color: #1890ff;">✅ 今回の解析結果:</h3>
                 <?php foreach ($results as $res): ?>
                     <div class="card">
-                        <small>📄 <?= htmlspecialchars($res['file']) ?></small>
+                        <small style="color:#aaa;">📄 ファイル: <?= htmlspecialchars($res['file']) ?></small>
                         <?php foreach ($res['items'] as $it): ?>
                             <div class="row">
                                 <span><?= htmlspecialchars($it['name']) ?></span>
@@ -215,14 +246,17 @@ if (!empty($processedIds)) {
                         <?php endforeach; ?>
                     </div>
                 <?php endforeach; ?>
-                <div class="amount-big">合計 ¥<?= number_format($totalAllAmount) ?></div>
+                <div class="grand-total">
+                    <div>合計金額</div>
+                    <div class="amount-big">¥<?= number_format($totalAllAmount) ?></div>
+                </div>
             </div>
         <?php endif; ?>
 
         <div class="nav-bar">
-            <a href="?action=csv" class="nav-link">CSV保存</a>
-            <a href="?action=download_log" class="nav-link">ログ</a>
-            <a href="?action=clear_view" class="nav-link">リセット</a>
+            <a href="?action=csv" class="nav-link">📥 CSVをダウンロード</a>
+            <a href="?action=download_log" class="nav-link">📝 ログをダウンロード</a>
+            <a href="?action=clear_view" class="nav-link" style="color:#1890ff;">🔄 表示をクリア</a>
         </div>
     </div>
 
@@ -232,24 +266,29 @@ if (!empty($processedIds)) {
         const btn = document.getElementById('submitBtn');
         const status = document.getElementById('status');
         const files = document.getElementById('fileInput').files;
-        
+        if (!files.length) return;
+
         btn.disabled = true;
         status.style.display = "block";
 
         const formData = new FormData();
         for (let i = 0; i < files.length; i++) {
-            status.innerText = `处理中 (${i+1}/${files.length})...`;
+            status.innerText = `画像を圧縮中 (${i+1}/${files.length})...`;
             const compressed = await compressImg(files[i]);
             formData.append('receipts[]', compressed, files[i].name);
         }
 
+        status.innerText = "Azure OCR で解析中...";
         fetch('', { method: 'POST', body: formData })
         .then(r => r.text())
         .then(html => {
             const doc = new DOMParser().parseFromString(html, 'text/html');
             document.body.innerHTML = doc.body.innerHTML;
         })
-        .catch(() => { alert("错误"); btn.disabled = false; });
+        .catch(err => {
+            alert("アップロードに失敗しました。ログを確認してください。");
+            btn.disabled = false;
+        });
     };
 
     function compressImg(file) {
@@ -262,14 +301,10 @@ if (!empty($processedIds)) {
                 img.onload = () => {
                     const canvas = document.createElement('canvas');
                     let w = img.width, h = img.height;
-                    // 统一限制 1600px，确保所有电脑传给服务器的清晰度一致
-                    if (w > 1600) { h = h * (1600/w); w = 1600; }
+                    if (w > 1200) { h = h * (1200/w); w = 1200; }
                     canvas.width = w; canvas.height = h;
-                    const ctx = canvas.getContext('2d');
-                    ctx.imageSmoothingEnabled = true;
-                    ctx.imageSmoothingQuality = 'high';
-                    ctx.drawImage(img, 0, 0, w, h);
-                    canvas.toBlob(blob => resolve(new File([blob], file.name, {type:'image/jpeg'})), 'image/jpeg', 0.95);
+                    canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+                    canvas.toBlob(blob => resolve(new File([blob], file.name, {type:'image/jpeg'})), 'image/jpeg', 0.85);
                 };
             };
         });
@@ -277,3 +312,5 @@ if (!empty($processedIds)) {
     </script>
 </body>
 </html>
+
+
