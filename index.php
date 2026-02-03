@@ -1,10 +1,9 @@
 <?php
 /**
- * 🧾 レシート解析システム - ページリセット版
- * 修正内容:
- * 1. "◎" 記号を含む商品名を表示・保存可能に。
- * 2. データベース削除機能を廃止し、「表示のリセット」に変更。
- * 3. ログ機能の強化: [STORE/TOTAL/ITEM] 形式で ocr.log に出力。
+ * 🧾 レシート解析システム - 增强版
+ * 修正内容：
+ * 1. 允许重复商品（不再过滤相同名称和价格的项目）。
+ * 2. 优化 OCR 行处理逻辑，提高对 FamilyMart 等便利店格式的兼容性。
  */
 
 // --- 1. 設定と環境構成 ---
@@ -32,11 +31,10 @@ if ($conn === false) {
 if (isset($_GET['action'])) {
     $action = $_GET['action'];
     
-    // CSVエクスポート
     if ($action == 'csv') {
         header('Content-Type: text/csv; charset=utf-8');
         header('Content-Disposition: attachment; filename=receipt_export_'.date('Ymd').'.csv');
-        echo "\xEF\xBB\xBF"; // UTF-8 BOM
+        echo "\xEF\xBB\xBF"; 
         $output = fopen('php://output', 'w');
         fputcsv($output, ['ファイル名', '項目', '金額', '日時']);
         $sql = "SELECT r.file_name, r.processed_at, i.item_name, i.price FROM receipts r JOIN receipt_items i ON r.id = i.receipt_id";
@@ -47,7 +45,6 @@ if (isset($_GET['action'])) {
         fclose($output); exit;
     }
 
-    // ログダウンロード
     if ($action == 'download_log') {
         if (file_exists($logFile)) {
             header('Content-Type: text/plain');
@@ -56,7 +53,6 @@ if (isset($_GET['action'])) {
         }
     }
 
-    // 表示をクリア (リダイレクトしてPOSTデータを破棄)
     if ($action == 'clear_view') {
         header("Location: " . strtok($_SERVER["PHP_SELF"], '?')); 
         exit;
@@ -68,7 +64,7 @@ $processedIds = [];
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
     foreach ($_FILES['receipts']['tmp_name'] as $key => $tmpName) {
         if (empty($tmpName)) continue;
-        if ($key > 0) sleep(1); // API制限回避用の待機
+        if ($key > 0) sleep(1); 
 
         $fileName = $_FILES['receipts']['name'][$key];
         $imgData = file_get_contents($tmpName);
@@ -99,39 +95,38 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
         for ($i = 0; $i < count($lines); $i++) {
             $text = trim($lines[$i]['text']);
             
-            // 店舗名の推測
             if ($i < 5 && preg_match('/FamilyMart|セブン|ローソン|LAWSON/i', $text, $storeMatch)) {
                 $logStore = $storeMatch[0];
             }
 
-            // 記号の除去（解析用）
-            $pureText = str_replace([' ', '　', '＊', '*', '√', '軽', '轻', '(', ')', '8%', '10%'], '', $text);
+            $pureText = str_replace([' ', '　', '＊', '*', '√', '轻', '(', ')', '8%', '10%'], '', $text);
 
-            // 合計金額の取得
+            // 合計金額（解析ログ用）
             if (preg_match('/合計|合計額/u', $pureText) && preg_match('/[¥￥]([\d,]+)/u', $text, $totalMatch)) {
                 $logTotal = (float)str_replace(',', '', $totalMatch[1]);
             }
 
-            // 解析停止ワード
-            if (preg_match('/内消費税|消費税|対象|支払|残高|再発行/u', $pureText)) {
+            // 解析停止ワード（收据末尾无关信息）
+            if (preg_match('/内消費税|対象|支払|残高|再発行/u', $pureText)) {
                 if (!empty($currentItems)) $stopFlag = true; 
                 continue; 
             }
             if ($stopFlag) continue;
 
-            // 商品と金額の抽出
+            // 商品と金額の抽出 (修正核心：放宽正则)
             if (preg_match('/[¥￥]([\d,]+)/u', $text, $matches)) {
                 $price = (int)str_replace(',', '', $matches[1]);
                 $nameInLine = trim(preg_replace('/[\.．…]+|[¥￥].*$/u', '', $text));
                 
-                // クリーニング (◎ は維持する)
-                $cleanNameInLine = str_replace(['＊', '*', '轻', '軽', '(', ')', '.', '．', ' '], '', $nameInLine);
+                // クリーニング
+                $cleanNameInLine = str_replace(['＊', '*', '轻', '(', ')', '.', '．', ' '], '', $nameInLine);
 
+                // 如果当前行只有价格，尝试寻找上一行作为商品名
                 if (mb_strlen($cleanNameInLine) < 2 || preg_match('/^[¥￥\d,\s]+$/u', $cleanNameInLine)) {
                     $foundName = "";
                     for ($j = $i - 1; $j >= 0; $j--) {
                         $prev = trim($lines[$j]['text']);
-                        $cleanPrev = str_replace(['＊', '*', ' ', '√', '軽', '轻'], '', $prev);
+                        $cleanPrev = str_replace(['＊', '*', ' ', '√', '轻'], '', $prev);
                         if (mb_strlen($cleanPrev) >= 2 && !preg_match('/領|収|証|合|計|%|店|電話|¥|￥/u', $cleanPrev)) {
                             $foundName = $cleanPrev; break;
                         }
@@ -141,16 +136,10 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
                     $finalName = $cleanNameInLine;
                 }
 
+                // 排除非商品关键词
                 if (!empty($finalName) && !preg_match('/Family|新宿|電話|登録|領収|対象|消費税|合計|内訳/u', $finalName)) {
-                    $isDuplicate = false;
-                    foreach ($currentItems as $existing) {
-                        if ($existing['name'] === $finalName && $existing['price'] === $price) {
-                            $isDuplicate = true; break;
-                        }
-                    }
-                    if (!$isDuplicate) {
-                        $currentItems[] = ['name' => $finalName, 'price' => $price];
-                    }
+                    // --- 💡 修正点：去掉了重复检查 $isDuplicate ---
+                    $currentItems[] = ['name' => $finalName, 'price' => $price];
                 }
             }
         }
@@ -158,10 +147,11 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
         // --- ログ書き出し ---
         $logContent = "\n===== OCR RESULT =====\n";
         $logContent .= "TIME: " . date('Y-m-d\TH:i:s.v') . "\n";
+        $logContent .= "FILE: $fileName\n";
         $logContent .= "STORE: $logStore\n";
-        $logContent .= "TOTAL: " . number_format($logTotal, 1, '.', '') . "\n";
+        $logContent .= "TOTAL_IN_RECEIPT: " . number_format($logTotal, 0) . "\n";
         foreach ($currentItems as $it) {
-            $logContent .= "{$it['name']}," . number_format($it['price'], 1, '.', '') . "\n";
+            $logContent .= "ITEM: {$it['name']}, PRICE: {$it['price']}\n";
         }
         file_put_contents($logFile, $logContent, FILE_APPEND);
 
@@ -185,8 +175,8 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['receipts'])) {
 $results = [];
 $totalAllAmount = 0;
 
-if ($_SERVER['REQUEST_METHOD'] == 'POST' && !empty($processedIds)) {
-    $idList = implode(',', $processedIds);
+if (!empty($processedIds)) {
+    $idList = implode(',', array_map('intval', $processedIds));
     $sqlMain = "SELECT id, file_name FROM receipts WHERE id IN ($idList)";
     $resMain = sqlsrv_query($conn, $sqlMain);
     if ($resMain) {
@@ -217,15 +207,14 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && !empty($processedIds)) {
         .grand-total { margin-top: 25px; padding: 20px; background: #fff5f5; border: 1px solid #ffccc7; border-radius: 10px; text-align: center; }
         .amount-big { font-size: 32px; font-weight: bold; color: #ff4d4f; }
         .btn-main { width: 100%; padding: 15px; background: #1890ff; color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; }
-        .btn-main:disabled { background: #ccc; }
+        .btn-main:hover { background: #40a9ff; }
         .nav-bar { margin-top: 25px; display: flex; justify-content: space-around; border-top: 1px solid #eee; padding-top: 15px; flex-wrap: wrap; gap: 10px; }
         .nav-link { font-size: 12px; color: #666; text-decoration: none; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; background: #fff; }
-        .nav-link:hover { background: #f9f9f9; }
     </style>
 </head>
 <body>
     <div class="box">
-        <h2 style="text-align:center;">📜 レシート解析 </h2>
+        <h2 style="text-align:center;">📜 レシート解析</h2>
         <form id="uploadForm" method="post" enctype="multipart/form-data">
             <input type="file" id="fileInput" name="receipts[]" multiple required style="margin-bottom:20px; width: 100%;">
             <button type="submit" id="submitBtn" class="btn-main">解析を開始してDBに保存</button>
@@ -255,7 +244,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && !empty($processedIds)) {
 
         <div class="nav-bar">
             <a href="?action=csv" class="nav-link">📥 CSVをダウンロード</a>
-            <a href="?action=download_log" class="nav-link">📝 ログをダウンロード</a>
+            <a href="?action=download_log" class="nav-link">📝 ログを下载</a>
             <a href="?action=clear_view" class="nav-link" style="color:#1890ff;">🔄 表示をクリア</a>
         </div>
     </div>
@@ -273,7 +262,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && !empty($processedIds)) {
 
         const formData = new FormData();
         for (let i = 0; i < files.length; i++) {
-            status.innerText = `画像を圧縮中 (${i+1}/${files.length})...`;
+            status.innerText = `画像を最適化中 (${i+1}/${files.length})...`;
             const compressed = await compressImg(files[i]);
             formData.append('receipts[]', compressed, files[i].name);
         }
@@ -286,7 +275,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && !empty($processedIds)) {
             document.body.innerHTML = doc.body.innerHTML;
         })
         .catch(err => {
-            alert("アップロードに失敗しました。ログを確認してください。");
+            alert("解析に失敗しました。");
             btn.disabled = false;
         });
     };
@@ -301,10 +290,11 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && !empty($processedIds)) {
                 img.onload = () => {
                     const canvas = document.createElement('canvas');
                     let w = img.width, h = img.height;
-                    if (w > 1200) { h = h * (1200/w); w = 1200; }
+                    // 稍微提高上限，保证清晰度
+                    if (w > 1600) { h = h * (1600/w); w = 1600; }
                     canvas.width = w; canvas.height = h;
                     canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-                    canvas.toBlob(blob => resolve(new File([blob], file.name, {type:'image/jpeg'})), 'image/jpeg', 0.85);
+                    canvas.toBlob(blob => resolve(new File([blob], file.name, {type:'image/jpeg'})), 'image/jpeg', 0.92);
                 };
             };
         });
@@ -312,4 +302,3 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && !empty($processedIds)) {
     </script>
 </body>
 </html>
-
